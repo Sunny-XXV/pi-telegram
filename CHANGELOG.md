@@ -7,6 +7,11 @@
 - `Input mode`: Ordinary Telegram prompts now support configurable Follow-up or native Steer delivery via `input.mode`, persistent target overrides, `/mode steer|followup`, and `/start` → Input mode. Idle prompts start normally; switching preserves waiting work. Source removal precedes one native issuance, whose acceptance remains unconfirmed and is never blindly replayed.
 - `Explicit steering`: `/steer <instruction>` offers a single text-only active-run correction without aborting tools or changing waiting prompts. Held cross-instance selection requires the negotiated steering capability and exact source/recipient fences.
 
+## 0.55.1: Visible Reroute and follower cleanup
+
+- `Reroute visibility`: Temporary Reroute forwards text, voice, files and albums into the selected Thread before local/follower admission, then anchors replies to confirmed copies. Source/recipient/generation fences reach HTTP and IPC write/ACK boundaries; one native grant prevents replay after partial/lost ACKs. Unknown cold All copies stay held with Cancel; real native-source recovery remains supported. Journal originals, receipt/group cleanup protections, Restore and cleanup timing are unchanged.
+- `Reroute cleanup`: A follower ACK no longer strands a resolved Routing tab when recipient queue custody blocks its first cleanup check. Metadata-only rechecks and existing delivery-drain wakes wait for fresh source/receipt protection to clear, including retained completed membership after runtime replacement. New input, live bindings, authority loss and unverifiable evidence remain protective; issued or unknown deletion never repeats.
+
 ## 0.55.0: Native Restore and fenced lifecycles
 
 - `Restore cleanup`: Live Restore binds the new tab and decides old-tab cleanup before native leader/follower inputs run. Protected work defers cleanup; session replacement carries no deletion grant, and unknown deletion never repeats. Follower execution targets the rebound tab without rewriting journal originals or quoting the former tab. Exact donor ACKs seal routing clocks and retire the menu. Reader/execution capabilities, source custody and detached replies stay separate; busy hints coalesce.

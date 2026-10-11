@@ -174,10 +174,16 @@ Use these in the bot DM.
 | `/compact` | Confirm and run session compaction when safe |
 | `/next` | Dispatch the next queued turn, aborting first if needed |
 | `/continue` | Enqueue a priority continuation prompt |
+| `/mode [steer\|followup]` | Show or save ordinary-message delivery for this chat/Thread; also in `/start` → Input mode |
+| `/steer <instruction>` | Submit a correction to an active Pi run without aborting tools or changing the waiting queue |
 | `/abort` | Abort the active run while preserving the queue |
 | `/stop` | Abort the active run and clear waiting Telegram turns |
 
 Hidden compatibility shortcuts: `/help`, `/status`, `/model`, `/thinking`, `/queue`, and `/settings` jump into the same menu system.
+
+Ordinary messages default to Follow-up (the existing Telegram waiting queue). Set `"input": { "mode": "steer" }` in `telegram.json`, use `/mode steer` or `/mode followup`, or open `/start` → **Input mode**. Telegram switches persist a profile/chat/Thread-specific override without changing other Threads. Steer inserts new messages after current tool work; idle messages start normally and compaction keeps them waiting. Existing queue entries never change mode. See [Configuration API](./docs/public-api.md#configuration-api) for target keys and exact settlement limits.
+
+`/steer` remains an explicit text-only single-message override. It requires an active run, rejects idle/compacting sessions, and uses Pi's native steering boundary after the current assistant/tool work. Direct command delivery waits for journal source removal and rechecks the same session/run before sending. The notice records the request only, not Pi acceptance or model consumption; the void host API cannot prove those. The bridge does not automatically replay an unconfirmed steering submission. A crash after source removal but before sending can lose the request.
 
 ## Pi Commands
 

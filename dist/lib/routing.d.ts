@@ -5,7 +5,7 @@
  */
 import * as Bus from "./bus.ts";
 import * as Commands from "./commands.ts";
-import type { TelegramConfigStore } from "./config.ts";
+import type { TelegramConfigStore, TelegramInputMode } from "./config.ts";
 import type { TelegramInboundHandlerRuntime } from "./inbound.ts";
 import type { TelegramUpdateJournalQueuedCompletion, TelegramUpdateJournalQueuedReceiptEvidence } from "./journal.ts";
 import * as Media from "./media.ts";
@@ -163,6 +163,15 @@ export declare function createTelegramInboundBusProjectionRuntime(deps: {
     getCurrentIdentity(target?: Queue.TelegramQueueTarget): TelegramInstanceThreadIdentityCandidate;
 }): TelegramInboundBusProjectionRuntime;
 export interface TelegramInboundRouteRuntimeDeps<TMessage extends TelegramRoutedMessage, TCallbackQuery extends TelegramRoutedCallbackQuery, TContext, TModel extends Model.MenuModel> {
+    getInputMode?: (target: {
+        chatId: number;
+        threadId?: number;
+    }) => TelegramInputMode;
+    refreshInputMode?: () => Promise<void>;
+    setInputMode?: (target: {
+        chatId: number;
+        threadId?: number;
+    }, mode: TelegramInputMode, isCurrent: () => boolean) => Promise<void>;
     configStore: Pick<TelegramConfigStore, "get" | "getAllowedUserId" | "persistAllowedUserId" | "persist"> & {
         set?: TelegramConfigStore["set"];
     };
@@ -312,7 +321,7 @@ export interface TelegramInboundRouteRuntimeDeps<TMessage extends TelegramRouted
     setThinkingLevel: (level: Model.ThinkingLevel) => void;
     persistScopedModelPatterns?: (patterns: string[], ctx: TContext) => Promise<void>;
     setModel: (model: TModel) => Promise<boolean>;
-    sendUserMessage?: (message: string, options?: Queue.TelegramPromptDeliveryOptions) => void;
+    sendUserMessage?: (message: string | Queue.PendingTelegramTurn["content"], options?: Queue.TelegramPromptDeliveryOptions) => void;
     isIdle: (ctx: TContext) => boolean;
     hasPendingMessages: (ctx: TContext) => boolean;
     requestNewSession?: (source: unknown) => void;

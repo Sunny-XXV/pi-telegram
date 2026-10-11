@@ -139,7 +139,7 @@ export function buildTimeInjectionModeSettingsText(mode) {
         "<code>-</code> <code>interval</code> (default): add time at most once per chat interval (1 hour unless configured).",
     ].join("\n");
 }
-export function buildTelegramSettingsMenuReplyMarkup(draftPreviewsEnabled, assistantRenderingModeOrVoiceReplyMode, voiceReplyModeOrTimeInjectionMode, timeInjectionModeOrSectionRegistry, sectionRegistryOrVoiceReplyModeConfigured, voiceReplyModeConfigured = true, automaticThreadCleanupEnabled = true, activityVerbosity = "quiet", threadDisplayMode, threadDisplayCustom = false) {
+export function buildTelegramSettingsMenuReplyMarkup(draftPreviewsEnabled, assistantRenderingModeOrVoiceReplyMode, voiceReplyModeOrTimeInjectionMode, timeInjectionModeOrSectionRegistry, sectionRegistryOrVoiceReplyModeConfigured, voiceReplyModeConfigured = true, automaticThreadCleanupEnabled = true, activityVerbosity = "quiet", threadDisplayMode, threadDisplayCustom = false, inputMode) {
     const hasRenderingMode = assistantRenderingModeOrVoiceReplyMode === "rich" ||
         assistantRenderingModeOrVoiceReplyMode === "html";
     const assistantRenderingMode = hasRenderingMode ? assistantRenderingModeOrVoiceReplyMode : "rich";
@@ -161,6 +161,8 @@ export function buildTelegramSettingsMenuReplyMarkup(draftPreviewsEnabled, assis
         [{ text: "⬆️ Main menu", callback_data: "menu:back" }],
     ];
     const settingsButtons = [
+        ...(inputMode ? [{ text: `🧭 Input mode: ${inputMode === "steer" ? "Steer" : "Follow-up"}`,
+                callback_data: "settings:open:input-mode" }] : []),
         {
             text: `📝 Draft previews: ${draftPreviewsEnabled ? "on" : "off"}`,
             callback_data: "settings:open:draft-previews",
@@ -339,7 +341,7 @@ export function buildVoiceReplyModeSettingsReplyMarkup(mode, configured = true) 
 }
 /** Settings markup from the current setting values; rendering only, no state mutation. */
 function buildCurrentTelegramSettingsMenuReplyMarkup(deps, sectionRegistry) {
-    return buildTelegramSettingsMenuReplyMarkup(deps.areDraftPreviewsEnabled(), deps.getAssistantRenderingMode(), deps.getVoiceReplyMode(), deps.getTimeInjectionMode(), sectionRegistry, deps.isVoiceReplyModeConfigured(), deps.isAutomaticThreadCleanupEnabled(), deps.getActivityVerbosity(), deps.getThreadDisplayMode?.(), deps.isThreadDisplayCustom?.() ?? false);
+    return buildTelegramSettingsMenuReplyMarkup(deps.areDraftPreviewsEnabled(), deps.getAssistantRenderingMode(), deps.getVoiceReplyMode(), deps.getTimeInjectionMode(), sectionRegistry, deps.isVoiceReplyModeConfigured(), deps.isAutomaticThreadCleanupEnabled(), deps.getActivityVerbosity(), deps.getThreadDisplayMode?.(), deps.isThreadDisplayCustom?.() ?? false, deps.getInputMode?.());
 }
 async function updateTelegramSettingsMenuMessage(deps, sectionRegistry) {
     await deps.updateSettingsMessage(buildTelegramSettingsMenuText(), buildCurrentTelegramSettingsMenuReplyMarkup(deps, sectionRegistry));
@@ -372,6 +374,28 @@ async function updateVoiceReplyModeSettingsMessage(deps) {
 export async function handleTelegramSettingsMenuCallbackAction(callbackQueryId, data, deps) {
     if (!data?.startsWith("settings:"))
         return false;
+    if (data === "settings:open:input-mode" || data.startsWith("settings:set:input-mode:")) {
+        if (!deps.getInputMode || !deps.setInputMode) {
+            await deps.answerCallbackQuery(callbackQueryId, "Input mode is unavailable");
+            return true;
+        }
+        const selected = data.slice("settings:set:input-mode:".length);
+        if (data.startsWith("settings:set:input-mode:")) {
+            if (selected !== "steer" && selected !== "followUp") {
+                await deps.answerCallbackQuery(callbackQueryId, "Invalid input mode");
+                return true;
+            }
+            await deps.setInputMode(selected);
+        }
+        const mode = deps.getInputMode();
+        await deps.updateSettingsMessage("<b>🧭 Input mode:</b>\nSteer: new messages adjust the active run after current tools.\nFollow-up: new messages wait until the run finishes.\nIdle messages start normally. Existing waiting messages are unchanged.", { inline_keyboard: [
+                [{ text: "⬆️ Back", callback_data: "settings:list" }],
+                [{ text: `${mode === "steer" ? "🟢 " : ""}Steer`, callback_data: "settings:set:input-mode:steer" }],
+                [{ text: `${mode === "followUp" ? "🟢 " : ""}Follow-up`, callback_data: "settings:set:input-mode:followUp" }],
+            ] });
+        await deps.answerCallbackQuery(callbackQueryId);
+        return true;
+    }
     if (data === "settings:open:thread-display" ||
         data.startsWith("settings:set:thread-display:")) {
         if (!deps.getThreadDisplayMode?.() || !deps.setThreadDisplayMode) {
@@ -564,7 +588,8 @@ export async function handleTelegramSettingsMenuCallbackAction(callbackQueryId, 
 }
 export function createTelegramSettingsMenuRuntime(deps, sectionRegistry) {
     // Read per call so later port replacement on deps stays visible.
-    const readSettingsState = () => ({
+    const readSettingsState = (target) => ({
+        getInputMode: target && deps.getTargetInputMode ? () => deps.getTargetInputMode(target) : undefined,
         areDraftPreviewsEnabled: deps.areDraftPreviewsEnabled,
         getAssistantRenderingMode: deps.getAssistantRenderingMode,
         getActivityVerbosity: deps.getActivityVerbosity,
@@ -582,7 +607,7 @@ export function createTelegramSettingsMenuRuntime(deps, sectionRegistry) {
             delivery.assertCurrent();
             return openTelegramSettingsMenu({
                 getModelMenuState: () => deps.getModelMenuState(chatId, ctx, threadId),
-                ...readSettingsState(),
+                ...readSettingsState({ chatId, threadId }),
                 sendSettingsMenu: (state, text, replyMarkup) => delivery.sendInteractiveMessage(state.chatId, text, "html", replyMarkup),
                 storeModelMenuState: delivery.storeModelMenuState,
             }, sectionRegistry);
@@ -590,7 +615,7 @@ export function createTelegramSettingsMenuRuntime(deps, sectionRegistry) {
         updateSettingsMenuMessage: async (state) => {
             await deps.reloadConfig?.();
             return updateTelegramSettingsMenuMessage({
-                ...readSettingsState(),
+                ...readSettingsState({ chatId: state.chatId, threadId: state.threadId }),
                 updateSettingsMessage: (text, replyMarkup) => deps.editInteractiveMessage(state.chatId, state.messageId, text, "html", replyMarkup),
             }, sectionRegistry);
         },
@@ -612,7 +637,8 @@ export function createTelegramSettingsMenuRuntime(deps, sectionRegistry) {
                 deps.storeModelMenuState(state);
             }
             return handleTelegramSettingsMenuCallbackAction(query.id, query.data, {
-                ...readSettingsState(),
+                ...readSettingsState({ chatId: state.chatId, threadId: state.threadId }),
+                setInputMode: deps.setTargetInputMode ? (mode) => deps.setTargetInputMode({ chatId: state.chatId, threadId: state.threadId }, mode, () => deps.isContextActive?.(ctx) !== false) : undefined,
                 setThreadDisplayMode: deps.setThreadDisplayMode,
                 setDraftPreviewsEnabled: deps.setDraftPreviewsEnabled,
                 setAssistantRenderingMode: deps.setAssistantRenderingMode,

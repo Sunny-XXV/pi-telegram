@@ -1798,6 +1798,30 @@ test("Setup prompt runtime guards concurrent setup and stores successful config"
   ]);
 });
 
+test("Input mode defaults and target overrides persist without changing other Threads", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "input-mode-"));
+  const configPath = join(dir, "telegram.json");
+  try {
+    const store = createTelegramConfigStore({ agentDir: dir, configPath,
+      initialConfig: { profiles: { default: { botToken: "fixture" } }, input: { mode: "steer" } } });
+    await store.persist();
+    const controls = createTelegramConfigControls(store);
+    const a = { chatId: 7, threadId: 42 }, b = { chatId: 7, threadId: 43 };
+    assert.equal(controls.getTargetInputMode(a), "steer");
+    await controls.setTargetInputMode(a, "followUp");
+    assert.equal(controls.getTargetInputMode(a), "followUp");
+    assert.equal(controls.getTargetInputMode(b), "steer");
+    const reloaded = createTelegramConfigStore({ agentDir: dir, configPath });
+    await reloaded.load();
+    assert.equal(createTelegramConfigControls(reloaded).getTargetInputMode(a), "followUp");
+    await assert.rejects(controls.setTargetInputMode(b, "followUp", () => false), /authority/);
+    assert.equal(controls.getTargetInputMode(b), "steer");
+    assert.equal((await stat(configPath)).mode & 0o777, 0o600);
+    const empty = createTelegramConfigControls(createTelegramConfigStore());
+    assert.equal(empty.getTargetInputMode(a), "followUp");
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
 test("Stored token references resolve from the configured environment", () => {
   assert.equal(resolveTelegramBotToken(undefined), undefined);
   assert.equal(resolveTelegramBotToken("  "), undefined);

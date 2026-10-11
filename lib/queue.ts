@@ -3344,7 +3344,7 @@ export function createTelegramQueueDispatchWatchdogRuntime<TContext = unknown>(
 // --- Dispatch Runtime ---
 
 export interface TelegramPromptDeliveryOptions {
-  deliverAs: "followUp";
+  deliverAs: "steer" | "followUp";
 }
 
 export interface TelegramDispatchRuntimeDeps<TContext = unknown> {

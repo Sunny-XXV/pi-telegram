@@ -2394,7 +2394,7 @@ test("Menu helpers build model, thinking, and status UI payloads", () => {
   const statusCallbackData = statusMarkup.inline_keyboard.flatMap((row) =>
     row.map((button) => button.callback_data),
   );
-  assert.equal(statusMarkup.inline_keyboard.length, 4);
+  assert.equal(statusMarkup.inline_keyboard.length, 5);
   assert.equal(
     statusMarkup.inline_keyboard[0]?.[0]?.text.startsWith("🤖 Model"),
     true,
@@ -2413,6 +2413,7 @@ test("Menu helpers build model, thinking, and status UI payloads", () => {
     "menu:model",
     "menu:thinking",
     "menu:queue",
+    "settings:open:input-mode",
     "menu:settings",
   ]);
   assert.equal(
@@ -2422,7 +2423,7 @@ test("Menu helpers build model, thinking, and status UI payloads", () => {
     false,
   );
   const noReasoningMarkup = buildStatusReplyMarkup(modelB, "medium");
-  assert.equal(noReasoningMarkup.inline_keyboard.length, 3);
+  assert.equal(noReasoningMarkup.inline_keyboard.length, 4);
 });
 
 test("Section callback actions preserve callback thread target", async () => {

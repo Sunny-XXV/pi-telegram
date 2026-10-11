@@ -13,6 +13,7 @@ import {
   pairTelegramUserIfNeeded,
   TELEGRAM_DEFAULT_PROFILE_NAME,
   type TelegramConfigStore,
+  type TelegramInputMode,
 } from "./config.ts";
 import type * as Pi from "./pi.ts";
 import type { ExtensionAPI, ExtensionCommandContext } from "./pi.ts";
@@ -23,6 +24,7 @@ import {
   createTelegramControlQueueController,
   createTelegramQueueAdmissionReceipt,
   type PendingTelegramControlItem,
+  type PendingTelegramTurn,
   type TelegramControlQueueController,
   type TelegramControlQueueControllerDeps,
   type TelegramQueueAdmissionReceipt,
@@ -43,6 +45,8 @@ import {
   getTelegramUpdateExecutionFence,
   inspectTelegramDeferredSource,
   prepareTelegramDeferredQueueAdmission,
+  collectTelegramAdmissionSourceUpdateIds,
+  reportTelegramUpdateCompleted,
   reportTelegramQueueAdmission,
   type TelegramDeferredQueueAdmissionPreparation,
   type TelegramDeferredSourceCompletionPreparation,
@@ -53,7 +57,7 @@ import {
 } from "./updates.ts";
 
 export type TelegramHeldCommandName =
-  "status" | "abort" | "stop" | "next" | "continue";
+  "status" | "abort" | "stop" | "next" | "continue" | "steer";
 
 /** Commands-owned no-fold admission over the ordinary recipient queue; source reporting stays separate from removal. */
 export interface TelegramHeldTurnAdmission {
@@ -395,6 +399,8 @@ export const TELEGRAM_COMMAND_EMOJI = {
   thread: "🧵",
   next: "⏩",
   continue: "▶️",
+  steer: "🧭",
+  mode: "🧭",
   abort: "⏹️",
   stop: "🟥",
   name: "🏷️",
@@ -501,6 +507,17 @@ const TELEGRAM_BUILTIN_BOT_COMMANDS: readonly TelegramBotCommandDefinition[] = [
     description: formatTelegramBotCommandDescription(
       "continue",
       "Queue continue prompt",
+    ),
+  },
+  {
+    command: "mode",
+    description: formatTelegramBotCommandDescription("mode", "Choose input mode"),
+  },
+  {
+    command: "steer",
+    description: formatTelegramBotCommandDescription(
+      "steer",
+      "Steer active turn",
     ),
   },
   {
@@ -964,6 +981,8 @@ export const TELEGRAM_RESERVED_COMMAND_NAMES = [
   "abort",
   "next",
   "continue",
+  "mode",
+  "steer",
   "status",
   "queue",
   "compact",
@@ -998,6 +1017,8 @@ export type TelegramCommandAction =
   | { kind: "abort"; executionMode: "immediate" }
   | { kind: "next"; executionMode: "immediate" }
   | { kind: "continue"; executionMode: "immediate" }
+  | { kind: "steer"; executionMode: "immediate" }
+  | { kind: "mode"; executionMode: "immediate" }
   | { kind: "queue"; executionMode: "immediate" }
   | { kind: "compact"; executionMode: "immediate" }
   | { kind: "status"; executionMode: "immediate" }
@@ -1017,6 +1038,11 @@ export interface TelegramCommandActionDeps<TMessage, TContext> {
   handleAbort: (message: TMessage, ctx: TContext) => Promise<void>;
   handleNext: (message: TMessage, ctx: TContext) => Promise<void>;
   handleContinue: (message: TMessage, ctx: TContext) => Promise<void>;
+  handleSteer: (
+    message: TMessage,
+    ctx: TContext,
+    instruction: string,
+  ) => Promise<void>;
   handleQueue: (message: TMessage, ctx: TContext) => Promise<void>;
   handleCompact: (message: TMessage, ctx: TContext) => Promise<void>;
   handleStatus: (message: TMessage, ctx: TContext) => Promise<void>;
@@ -1471,6 +1497,12 @@ export interface TelegramCommandRuntimeDeps<
 >
   extends TelegramRuntimeEventRecorderPort, TelegramCommandEffectWorkPort {
   hasAbortHandler: () => boolean;
+  getAbortHandler?: () => (() => void) | undefined;
+  getSessionGeneration?: () => number;
+  getInputMode?: (target: { chatId: number; threadId?: number }) => TelegramInputMode;
+  refreshInputMode?: () => Promise<void>;
+  setInputMode?: (target: { chatId: number; threadId?: number }, mode: TelegramInputMode, isCurrent: () => boolean) => Promise<void>;
+  sendModePrompt?: (content: PendingTelegramTurn["content"], ctx: TContext) => void;
   clearPendingModelSwitch: () => void;
   hasQueuedTelegramItems: () => boolean;
   clearQueuedTelegramItems: (ctx: TContext) => number;
@@ -1498,6 +1530,12 @@ export interface TelegramCommandRuntimeDeps<
   ) => void;
   stopTypingLoop?: () => void;
   enqueueContinueTurn: (message: TMessage, ctx: TContext) => Promise<void>;
+  steerCurrentTurn?: (
+    message: TMessage,
+    ctx: TContext,
+    instruction: string,
+  ) => void;
+  getAdmissionJournalBinding?: () => string | undefined;
   heldTurn?: {
     enqueue(
       message: TMessage,
@@ -1598,6 +1636,8 @@ function formatTelegramAppMenuIntroHtml(
     line("compact", "Compact current session"),
     line("new", "Start a new session"),
     line("continue", "Queue continue prompt"),
+    line("mode", "Input mode: steer / followup"),
+    line("steer", "Steer active turn"),
     line("next", "Force next turn"),
     ...extensionLines,
     line("abort", "Abort Pi"),
@@ -1696,6 +1736,8 @@ export const TELEGRAM_COMMAND_ACTIONS = {
   abort: { kind: "abort", executionMode: "immediate" },
   next: { kind: "next", executionMode: "immediate" },
   continue: { kind: "continue", executionMode: "immediate" },
+  mode: { kind: "mode", executionMode: "immediate" },
+  steer: { kind: "steer", executionMode: "immediate" },
   status: { kind: "status", executionMode: "immediate" },
   queue: { kind: "queue", executionMode: "immediate" },
   compact: { kind: "compact", executionMode: "immediate" },
@@ -1842,6 +1884,73 @@ async function handleTelegramContinueCommand<TMessage, TContext>(
   },
 ): Promise<void> {
   await deps.enqueueContinueTurn(message, ctx);
+}
+
+export async function handleTelegramSteerCommand(deps: {
+  instruction: string;
+  hasAbortHandler: () => boolean;
+  isIdle: () => boolean;
+  isCompactionInProgress: () => boolean;
+  steerCurrentTurn?: (instruction: string) => void;
+  recordRuntimeEvent?: TelegramRuntimeEventRecorderPort["recordRuntimeEvent"];
+  sendTextReply: (
+    text: string,
+    options?: { parseMode?: "HTML" },
+  ) => Promise<void>;
+}): Promise<void> {
+  const instruction = deps.instruction.trim();
+  if (!instruction) {
+    await deps.sendTextReply(
+      formatTelegramInformationHeading("🧭", "Usage: /steer <instruction>."),
+      { parseMode: "HTML" },
+    );
+    return;
+  }
+  if (deps.isCompactionInProgress()) {
+    await deps.sendTextReply(
+      formatTelegramInformationHeading("⏳", "Cannot steer during compaction. Wait for it to finish."),
+      { parseMode: "HTML" },
+    );
+    return;
+  }
+  const hasActiveRun = !deps.isIdle() && deps.hasAbortHandler();
+  if (!hasActiveRun) {
+    await deps.sendTextReply(
+      formatTelegramInformationHeading(
+        "💤",
+        "No active turn to steer. Send a normal message instead.",
+      ),
+      { parseMode: "HTML" },
+    );
+    return;
+  }
+  if (!deps.steerCurrentTurn) {
+    await deps.sendTextReply(
+      formatTelegramInformationHeading(
+        "🚫",
+        "Steering is unavailable in this Pi runtime.",
+      ),
+      { parseMode: "HTML" },
+    );
+    return;
+  }
+  try {
+    deps.steerCurrentTurn(instruction);
+  } catch (error) {
+    // The native send port is void: an issued attempt is never automatically replayed.
+    try {
+      deps.recordRuntimeEvent?.("telegram-command", error, { command: "steer", phase: "native-send" });
+    } catch { /* A diagnostic failure cannot authorize replay. */ }
+    await deps.sendTextReply(
+      formatTelegramInformationHeading("⚠️", "Steering submission could not be confirmed. It will not be retried automatically."),
+      { parseMode: "HTML" },
+    );
+    return;
+  }
+  await deps.sendTextReply(
+    formatTelegramInformationHeading("🧭", "Steering request recorded; Pi acceptance is not confirmed."),
+    { parseMode: "HTML" },
+  );
 }
 
 function dispatchNextQueuedTelegramTurnAfterCompact(
@@ -2137,6 +2246,7 @@ export async function executeTelegramCommandAction<TMessage, TContext>(
 ): Promise<boolean> {
   switch (action.kind) {
     case "ignore":
+    case "mode": // The source-fenced handler owns this configuration-only command.
       return false;
     case "stop":
       await deps.handleStop(message, ctx);
@@ -2155,6 +2265,9 @@ export async function executeTelegramCommandAction<TMessage, TContext>(
       return true;
     case "continue":
       await deps.handleContinue(message, ctx);
+      return true;
+    case "steer":
+      await deps.handleSteer(message, ctx, commandArgs);
       return true;
     case "queue":
       await deps.handleQueue(message, ctx);
@@ -2228,6 +2341,12 @@ export function createTelegramCommandHandlerTargetRuntime<
   return createTelegramCommandHandler({
     assertExecutionCurrent: deps.assertExecutionCurrent,
     hasAbortHandler: deps.hasAbortHandler,
+    getAbortHandler: deps.getAbortHandler,
+    getSessionGeneration: deps.getSessionGeneration,
+    getInputMode: deps.getInputMode,
+    refreshInputMode: deps.refreshInputMode,
+    setInputMode: deps.setInputMode,
+    sendModePrompt: deps.sendModePrompt,
     clearPendingModelSwitch: deps.clearPendingModelSwitch,
     hasQueuedTelegramItems: deps.hasQueuedTelegramItems,
     clearQueuedTelegramItems: deps.clearQueuedTelegramItems,
@@ -2250,6 +2369,8 @@ export function createTelegramCommandHandlerTargetRuntime<
     startTypingLoop: deps.startTypingLoop,
     stopTypingLoop: deps.stopTypingLoop,
     enqueueContinueTurn: deps.enqueueContinueTurn,
+    steerCurrentTurn: deps.steerCurrentTurn,
+    getAdmissionJournalBinding: deps.getAdmissionJournalBinding,
     heldTurn: deps.heldTurn,
     compact: deps.compact,
     requestNewSession: deps.requestNewSession,
@@ -2358,17 +2479,102 @@ export function createTelegramCommandHandler<
   TMessage extends TelegramCommandRuntimeMessage,
   TContext,
 >(deps: TelegramCommandRuntimeDeps<TMessage, TContext>) {
+  // Pending/issued identities are bounded session-local fences, not another executable inbox.
+  const steering = new Map<string, {
+    identity: string;
+    ctx: TContext;
+    run?: () => void;
+  }>();
+  const modePrompts = new Map<string, {
+    ctx: TContext;
+    identity: string;
+    remaining: Set<number>;
+    run(): void;
+  }>();
   const handle = async (
     commandName: string | undefined,
     message: TMessage,
     ctx: TContext,
     commandArgs?: string,
   ): Promise<boolean> => {
+    let commandDeps = deps;
+    if (commandName === "mode") {
+      const target = getTelegramCommandMessageTarget(message);
+      const current = () => deps.isContextActive?.(ctx) !== false &&
+        getTelegramUpdateExecutionFence(message)?.isCurrent() !== false;
+      await deps.refreshInputMode?.();
+      deps.assertExecutionCurrent?.(message);
+      const argument = commandArgs?.trim().toLowerCase();
+      const mode = argument === "steer" ? "steer" :
+        argument === "followup" || argument === "follow-up" ? "followUp" : undefined;
+      let text: string;
+      if (!deps.getInputMode || !deps.setInputMode) text = "Input mode is unavailable.";
+      else if (argument && !mode) text = "Usage: /mode steer or /mode followup.";
+      else {
+        if (mode) await deps.setInputMode(target, mode, current);
+        deps.assertExecutionCurrent?.(message);
+        text = `Input mode: ${deps.getInputMode(target) === "steer" ? "Steer" : "Follow-up"}. ` +
+          "Use /mode steer or /mode followup. Only new messages are affected; idle messages start normally.";
+      }
+      scheduleTelegramCommandEffect(ctx, "mode", "command-reply", deps,
+        () => deps.sendTextReply(message, text),
+        () => deps.assertExecutionCurrent?.(message));
+      return true;
+    }
+    if (commandName === "steer" && deps.steerCurrentTurn) {
+      const nativeSend = deps.steerCurrentTurn;
+      commandDeps = {
+        ...deps,
+        steerCurrentTurn(value, context, instruction) {
+          const ids = collectTelegramAdmissionSourceUpdateIds([value]);
+          if (ids.length === 0) {
+            if (value.pi_telegram_source_update_id !== undefined)
+              throw new Error("Steering source authority is unavailable.");
+            // Source-less calls are the local, non-journal helper surface.
+            nativeSend(value, context, instruction);
+            return;
+          }
+          const binding = deps.getAdmissionJournalBinding?.();
+          if (ids.length !== 1 || !binding)
+            throw new Error("Steering needs one current journal source.");
+          const key = `${binding}:${ids[0]}`;
+          const identity = createHash("sha256").update(JSON.stringify([
+            getTelegramCommandMessageTarget(value), instruction,
+          ])).digest("hex");
+          const existing = steering.get(key);
+          if (existing) {
+            if (existing.ctx !== context || existing.identity !== identity)
+              throw new Error("Steering source identity changed.");
+            return;
+          }
+          if (steering.size >= 256)
+            throw new Error("Session steering fence capacity reached.");
+          const anchor = copySelectedReplyAnchor(value);
+          const sessionGeneration = deps.getSessionGeneration?.();
+          const abortHandler = deps.getAbortHandler?.();
+          steering.set(key, {
+            identity,
+            ctx: context,
+            run: () => {
+              if (deps.isContextActive?.(context) === false ||
+                  deps.getSessionGeneration?.() !== sessionGeneration ||
+                  deps.getAbortHandler?.() !== abortHandler ||
+                  deps.getAdmissionJournalBinding?.() !== binding ||
+                  deps.steerCurrentTurn !== nativeSend ||
+                  deps.isCompactionInProgress() || deps.isIdle(context) ||
+                  !deps.hasAbortHandler()) return;
+              nativeSend(anchor, context, instruction);
+            },
+          });
+          // The ordinary handler returns complete; only its exact worker removal ACK issues the send.
+        },
+      };
+    }
     return handleTelegramCommandRuntime(
       commandName,
       message,
       ctx,
-      deps,
+      commandDeps,
       commandArgs,
     );
   };
@@ -2587,6 +2793,7 @@ export function createTelegramCommandHandler<
       semantic: ReturnType<typeof guardSelectedEffect>,
       complete: () => void,
       reply: (text: string, options?: { parseMode?: "HTML" }) => Promise<void>,
+      message: TMessage,
     ) => Promise<void>,
     replyDelivery: "inline" | "detached" = "detached",
   ) => {
@@ -2636,7 +2843,7 @@ export function createTelegramCommandHandler<
               deliver,
               input.assertRecipient,
             );
-        });
+        }, input.message);
         return true;
       },
     };
@@ -2932,6 +3139,34 @@ export function createTelegramCommandHandler<
         return prepareHeldQueuePlan(ctx);
       },
     },
+    steer: {
+      completion: "after-semantics",
+      effect: "sendTextReply",
+      available: () => typeof deps.steerCurrentTurn === "function",
+      prepare(ctx, effects, command, delivery) {
+        if (!command || command.name !== "steer") return undefined;
+        return prepareHeldReplyPlan(
+          ctx,
+          effects!,
+          async (captured, semantic, _complete, reply, message) => {
+            await handleTelegramSteerCommand({
+              instruction: command.args,
+              hasAbortHandler: semantic(captured.hasAbortHandler),
+              isIdle: semantic(() => captured.isIdle(ctx)),
+              isCompactionInProgress: semantic(captured.isCompactionInProgress),
+              recordRuntimeEvent: captured.recordRuntimeEvent,
+              steerCurrentTurn: captured.steerCurrentTurn
+                ? semantic((instruction) =>
+                    captured.steerCurrentTurn!(message, ctx, instruction),
+                  )
+                : undefined,
+              sendTextReply: reply,
+            });
+          },
+          delivery,
+        );
+      },
+    },
   };
   const getHeldTemplatePlan = (name: string): HeldPlan | undefined => {
     const owner = deps.heldTurn,
@@ -3048,7 +3283,7 @@ export function createTelegramCommandHandler<
   ): (() => Promise<boolean>) | undefined => {
     const original = messages[0];
     if (
-      !["status", "abort", "stop", "next"].includes(command.name) ||
+      !["status", "abort", "stop", "next", "steer"].includes(command.name) ||
       messages.length !== 1 ||
       !original ||
       typeof admission.assertSourceCurrent !== "function" ||
@@ -3211,6 +3446,78 @@ export function createTelegramCommandHandler<
       });
     };
   return Object.assign(handle, {
+    /** Prepared ordinary input keeps images/context; every original must settle before one native issuance. */
+    recordModePrompt(messages: TMessage[], ctx: TContext, content: PendingTelegramTurn["content"]): boolean {
+      if (!deps.sendModePrompt) return false;
+      const binding = deps.getAdmissionJournalBinding?.();
+      const ids = collectTelegramAdmissionSourceUpdateIds(messages);
+      if (!binding || ids.length !== messages.length) return false;
+      for (const message of messages) deps.assertExecutionCurrent?.(message);
+      const keys = ids.map((id) => `${binding}:${id}`);
+      const identity = createHash("sha256").update(JSON.stringify([ids, content])).digest("hex");
+      const prior = keys.map((key) => modePrompts.get(key));
+      if (prior.some(Boolean)) {
+        if (!prior[0] || prior.some((value) => value !== prior[0]) ||
+            prior[0].ctx !== ctx || prior[0].identity !== identity) return false;
+        for (const message of messages) {
+          if (!reportTelegramUpdateCompleted(message)) throw new Error("Input mode source settlement is unconfirmed.");
+        }
+        return true;
+      }
+      if (modePrompts.size + keys.length > 256) return false;
+      const generation = deps.getSessionGeneration?.();
+      const abortHandler = deps.getAbortHandler?.();
+      const record = { ctx, identity, remaining: new Set(ids), run() {
+        if (deps.isContextActive?.(ctx) === false ||
+            deps.getSessionGeneration?.() !== generation ||
+            deps.getAdmissionJournalBinding?.() !== binding ||
+            deps.isCompactionInProgress() ||
+            (!deps.isIdle(ctx) && deps.getAbortHandler?.() !== abortHandler)) {
+          deps.recordRuntimeEvent?.("telegram-command", new Error("Input mode prompt lost its captured session/run."),
+            { command: "mode", phase: "native-send-stale" });
+          return;
+        }
+        deps.sendModePrompt!(content, ctx);
+      } };
+      for (const key of keys) modePrompts.set(key, record);
+      // Reporting is not issuance: all exact worker-removal acknowledgements are required.
+      try {
+        for (const message of messages) {
+          if (!reportTelegramUpdateCompleted(message)) throw new Error("Input mode source settlement is unconfirmed.");
+        }
+      } catch (error) {
+        record.run = () => {}; // Partial semantic reports never grant a later grouped send.
+        throw error;
+      }
+      return true;
+    },
+    /** Exact journal removal ACK, not a semantic report or native Pi acceptance. */
+    onSourceCompleted(updateId: number, ctx: TContext, journalBindingKey?: string) {
+      if (!journalBindingKey) return;
+      const key = `${journalBindingKey}:${updateId}`;
+      const prompt = modePrompts.get(key);
+      if (prompt?.ctx === ctx) {
+        modePrompts.delete(key);
+        prompt.remaining.delete(updateId);
+        if (prompt.remaining.size === 0) {
+          try { prompt.run(); }
+          catch (error) {
+            try { deps.recordRuntimeEvent?.("telegram-command", error, { command: "mode", phase: "native-send" }); }
+            catch { /* A disposed source cannot replay through diagnostics. */ }
+          }
+        }
+      }
+      const record = steering.get(key);
+      if (!record || record.ctx !== ctx || !record.run) return;
+      const run = record.run;
+      record.run = undefined; // Issuance is one-shot even when the void native port throws.
+      try { run(); }
+      catch (error) {
+        try {
+          deps.recordRuntimeEvent?.("telegram-command", error, { command: "steer", phase: "native-send" });
+        } catch { /* Diagnostics cannot replay a disposed source. */ }
+      }
+    },
     /** Command-only producer execution; Routing must supply the captured plan and released exact-source authority. */
     prepareSelectedExtensionCommand(
       prepared: NonNullable<
@@ -3549,7 +3856,7 @@ export function createTelegramCommandHandler<
     ): TelegramPreparedHeldCommand | undefined {
       const plan = getHeldPlan(name, effects);
       if (!plan) return undefined;
-      const value = plan.template
+      const value = plan.template || name === "steer"
         ? readiness.snapshot.update.message
         : undefined;
       const command =
@@ -4007,6 +4314,29 @@ async function handleTelegramCommandRuntime<
       handleContinue: async (nextMessage, commandCtx) => {
         await handleTelegramContinueCommand(nextMessage, commandCtx, {
           enqueueContinueTurn: deps.enqueueContinueTurn,
+        });
+      },
+      handleSteer: async (nextMessage, commandCtx, instruction) => {
+        const sendReply = sendReplyFor(nextMessage);
+        await handleTelegramSteerCommand({
+          instruction,
+          hasAbortHandler: deps.hasAbortHandler,
+          isIdle: () => deps.isIdle(commandCtx),
+          isCompactionInProgress: deps.isCompactionInProgress,
+          recordRuntimeEvent: deps.recordRuntimeEvent,
+          steerCurrentTurn: deps.steerCurrentTurn
+            ? (text) => deps.steerCurrentTurn!(nextMessage, commandCtx, text)
+            : undefined,
+          sendTextReply: async (text, options) => {
+            scheduleTelegramCommandEffect(
+              commandCtx,
+              "steer",
+              "command-reply",
+              deps,
+              () => sendReply(text, options),
+              assertExecutionCurrentFor(nextMessage),
+            );
+          },
         });
       },
       handleQueue: async (nextMessage, commandCtx) => {

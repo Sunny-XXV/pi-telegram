@@ -76,6 +76,7 @@ export function buildStatusReplyMarkup(activeModel, currentThinkingLevel, queueI
             rows.push([row]);
         }
     }
+    rows.push([{ text: "🧭 Input mode", callback_data: "settings:open:input-mode" }]);
     rows.push([
         {
             text: "⚙️ Settings",

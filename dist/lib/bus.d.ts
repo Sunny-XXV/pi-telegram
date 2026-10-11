@@ -50,6 +50,8 @@ export declare const TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_SETTLE: "live-thread-re
 export declare const TELEGRAM_BUS_CAPABILITY_SELECTED_MENU_DELIVERY: "selected-menu-delivery-v1";
 /** Versioned held-command set; syntax is shared, while the captured recipient Commands registry owns supported plans. */
 export declare const TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_COMMAND_SET: "live-thread-rebind-command-set-v1";
+/** Explicit native Pi steering; older command-set peers must not be offered `/steer`. */
+export declare const TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_STEER: "live-thread-rebind-steer-v1";
 /** Every live rebinding needs the save/apply/settle trio; held command selections additionally need these two. */
 export declare const TELEGRAM_BUS_LIVE_REBIND_CAPABILITIES: readonly ["live-thread-rebind-save-v1", "live-thread-rebind-apply-v1", "live-thread-rebind-settle-v1"];
 export declare const TELEGRAM_BUS_HELD_COMMAND_CAPABILITIES: readonly ["live-thread-rebind-command-set-v1", "selected-menu-delivery-v1"];

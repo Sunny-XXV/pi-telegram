@@ -3,7 +3,7 @@
  * Zones: telegram ui, settings controls, menu composition
  * Owns hidden settings-menu rendering, settings callbacks, and persisted toggle wiring
  */
-import type { TelegramActivityVerbosity, TelegramAssistantRenderingMode, TelegramThreadDisplayMode, TelegramTimeMode } from "./config.ts";
+import type { TelegramActivityVerbosity, TelegramAssistantRenderingMode, TelegramInputMode, TelegramThreadDisplayMode, TelegramTimeMode } from "./config.ts";
 import type { TelegramInlineKeyboardMarkup } from "./keyboard.ts";
 import { type TelegramMenuMessageRuntimeDeps, type TelegramModelMenuState } from "./menu-model.ts";
 import type { MenuModel } from "./model.ts";
@@ -12,6 +12,7 @@ import type { TelegramApiCallOptions } from "./telegram-api.ts";
 import type { TelegramVoiceReplyMode } from "./voice.ts";
 export type TelegramSettingsMenuReplyMarkup = TelegramInlineKeyboardMarkup;
 export interface TelegramSettingsStateDeps {
+    getInputMode?: () => TelegramInputMode;
     getThreadDisplayMode?: () => TelegramThreadDisplayMode | undefined;
     isThreadDisplayCustom?: () => boolean;
     areDraftPreviewsEnabled: () => boolean;
@@ -23,6 +24,7 @@ export interface TelegramSettingsStateDeps {
     isAutomaticThreadCleanupEnabled: () => boolean;
 }
 export interface TelegramSettingsMutationDeps extends TelegramSettingsStateDeps {
+    setInputMode?: (mode: TelegramInputMode) => Promise<void>;
     setThreadDisplayMode?: (mode: TelegramThreadDisplayMode) => Promise<void>;
     setDraftPreviewsEnabled: (enabled: boolean) => Promise<void>;
     setAssistantRenderingMode: (mode: TelegramAssistantRenderingMode) => Promise<void>;
@@ -71,6 +73,15 @@ export interface TelegramSettingsMenuMessageUpdateDeps extends TelegramSettingsS
 }
 export interface TelegramSettingsMenuRuntimeDeps<TContext, TModel extends MenuModel = MenuModel> extends TelegramSettingsMutationDeps {
     reloadConfig?: () => Promise<void>;
+    getTargetInputMode?: (target: {
+        chatId: number;
+        threadId?: number;
+    }) => TelegramInputMode;
+    setTargetInputMode?: (target: {
+        chatId: number;
+        threadId?: number;
+    }, mode: TelegramInputMode, isCurrent: () => boolean) => Promise<void>;
+    isContextActive?: (ctx: TContext) => boolean;
     getModelMenuState: (chatId: number, ctx: TContext, threadId?: number) => Promise<TelegramModelMenuState<TModel>>;
     getStoredModelMenuState: (messageId: number | undefined, chatId?: number) => TelegramModelMenuState<TModel> | undefined;
     storeModelMenuState: (state: TelegramModelMenuState<TModel>) => void;
@@ -87,7 +98,7 @@ export declare function buildAssistantRenderingSettingsText(mode: TelegramAssist
 export declare function buildActivityVerbositySettingsText(verbosity: TelegramActivityVerbosity): string;
 export declare function buildVoiceReplyModeSettingsText(mode: TelegramVoiceReplyMode, configured?: boolean): string;
 export declare function buildTimeInjectionModeSettingsText(mode: TelegramTimeMode): string;
-export declare function buildTelegramSettingsMenuReplyMarkup(draftPreviewsEnabled: boolean, assistantRenderingModeOrVoiceReplyMode: TelegramAssistantRenderingMode | TelegramVoiceReplyMode, voiceReplyModeOrTimeInjectionMode: TelegramVoiceReplyMode | TelegramTimeMode, timeInjectionModeOrSectionRegistry?: TelegramTimeMode | TelegramSectionRegistry, sectionRegistryOrVoiceReplyModeConfigured?: TelegramSectionRegistry | boolean, voiceReplyModeConfigured?: boolean, automaticThreadCleanupEnabled?: boolean, activityVerbosity?: TelegramActivityVerbosity, threadDisplayMode?: TelegramThreadDisplayMode, threadDisplayCustom?: boolean): TelegramSettingsMenuReplyMarkup;
+export declare function buildTelegramSettingsMenuReplyMarkup(draftPreviewsEnabled: boolean, assistantRenderingModeOrVoiceReplyMode: TelegramAssistantRenderingMode | TelegramVoiceReplyMode, voiceReplyModeOrTimeInjectionMode: TelegramVoiceReplyMode | TelegramTimeMode, timeInjectionModeOrSectionRegistry?: TelegramTimeMode | TelegramSectionRegistry, sectionRegistryOrVoiceReplyModeConfigured?: TelegramSectionRegistry | boolean, voiceReplyModeConfigured?: boolean, automaticThreadCleanupEnabled?: boolean, activityVerbosity?: TelegramActivityVerbosity, threadDisplayMode?: TelegramThreadDisplayMode, threadDisplayCustom?: boolean, inputMode?: TelegramInputMode): TelegramSettingsMenuReplyMarkup;
 export declare function buildThreadDisplaySettingsReplyMarkup(mode: TelegramThreadDisplayMode, custom?: boolean): TelegramSettingsMenuReplyMarkup;
 export declare function buildAutomaticThreadCleanupSettingsReplyMarkup(enabled: boolean, canReviewInactiveThreads?: boolean): TelegramSettingsMenuReplyMarkup;
 export declare function buildDraftPreviewsSettingsReplyMarkup(enabled: boolean): TelegramSettingsMenuReplyMarkup;

@@ -45,6 +45,7 @@ Use emoji as stable semantic markers, not decoration. Emoji carry transportable 
 | --- | --- | --- | --- |
 | `🟢` | Start / active / current positive state | `/start`, active row, current selected option, active `On` toggle | In command context it means “open/start menu”; in state context it means selected/active. |
 | `🗜` | Compact session | `/compact`, compact confirmation action | Do not use for generic cleanup/delete. |
+| `🧭` | Input delivery mode and explicit steering | Input mode menu, `/mode`, `/steer` command and notices | Distinguishes native active-run correction from waiting Follow-up without aborting tools or promoting queued prompts. |
 | `⏩` | Abort and advance | Busy `/next` command result and matching menu action | Means the active turn is aborted before advancing to queued work. |
 | `▶️` | Play / continue immediately | Idle `/next` result, `/continue` command, and matching menu action | Means work can start or resume directly without first aborting an active turn. |
 | `⏹️` | Abort current Pi work | `/abort` command description and active `/stop` result | Stops active work; accompanying copy states separately when queued work is cleared. |

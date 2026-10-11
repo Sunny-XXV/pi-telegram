@@ -54,6 +54,7 @@ import {
   openTelegramNewConfirmation,
   handleTelegramNextCommand,
   handleTelegramStopCommand,
+  handleTelegramSteerCommand,
   parseTelegramCommand,
   registerTelegramBotCommands,
   registerTelegramCommand,
@@ -355,6 +356,7 @@ test("Command helpers expose Telegram bot command definitions", () => {
     "compact",
     "next",
     "continue",
+    "steer",
     "abort",
     "stop",
   ]) {
@@ -374,6 +376,11 @@ test("Command helpers expose Telegram bot command definitions", () => {
     {
       command: "continue",
       description: "▶️ Queue continue prompt",
+    },
+    { command: "mode", description: "🧭 Choose input mode" },
+    {
+      command: "steer",
+      description: "🧭 Steer active turn",
     },
     {
       command: "next",
@@ -566,9 +573,9 @@ test("Command helpers register extension Telegram bot commands when visible", as
   });
   assert.deepEqual(calls, [
     [
-      ...TELEGRAM_BOT_COMMANDS.slice(0, 5),
+      ...TELEGRAM_BOT_COMMANDS.slice(0, 7),
       { command: "fresh", description: "🆕 Start fresh" },
-      ...TELEGRAM_BOT_COMMANDS.slice(5),
+      ...TELEGRAM_BOT_COMMANDS.slice(7),
     ],
   ]);
   dispose();
@@ -1441,6 +1448,10 @@ test("Command helpers build command actions", () => {
     kind: "continue",
     executionMode: "immediate",
   });
+  assert.deepEqual(buildTelegramCommandAction("steer"), {
+    kind: "steer",
+    executionMode: "immediate",
+  });
   assert.deepEqual(buildTelegramCommandAction("help"), {
     kind: "help",
     commandName: "help",
@@ -1473,6 +1484,7 @@ test("Command execution mode contract keeps Telegram controls immediate", () => 
     ["help", "immediate"],
     ["start", "immediate"],
     ["continue", "immediate"],
+    ["steer", "immediate"],
     ["status", "immediate"],
     ["model", "immediate"],
     ["unknown", "ignored"],
@@ -2053,6 +2065,64 @@ test("Command helpers report compact errors", async () => {
     "throw-status",
     "event:compact:sync boom!",
     "reply:<b>⚠️ Compaction failed! sync boom!</b>",
+  ]);
+});
+
+test("Command helpers steer only an active turn", async () => {
+  const events: string[] = [];
+  const base = {
+    instruction: "  focus on tests  ",
+    hasAbortHandler: () => true,
+    isIdle: () => false,
+    isCompactionInProgress: () => false,
+    steerCurrentTurn: (instruction: string) => events.push(`steer:${instruction}`),
+    sendTextReply: async (text: string) => { events.push(`reply:${text}`); },
+  };
+  await handleTelegramSteerCommand(base);
+  assert.deepEqual(events, [
+    "steer:focus on tests",
+    "reply:<b>🧭 Steering request recorded; Pi acceptance is not confirmed.</b>",
+  ]);
+
+  events.length = 0;
+  await handleTelegramSteerCommand({
+    ...base,
+    isIdle: () => true,
+    hasAbortHandler: () => false,
+  });
+  assert.deepEqual(events, [
+    "reply:<b>💤 No active turn to steer. Send a normal message instead.</b>",
+  ]);
+
+  events.length = 0;
+  await handleTelegramSteerCommand({ ...base, instruction: "  " });
+  assert.deepEqual(events, ["reply:<b>🧭 Usage: /steer &lt;instruction&gt;.</b>"]);
+});
+
+test("Steering rejects compaction, unavailable native delivery and unconfirmed sends", async () => {
+  const replies: string[] = [], errors: unknown[] = [];
+  let sends = 0;
+  const base = {
+    instruction: "focus on tests",
+    isIdle: () => false,
+    hasAbortHandler: () => true,
+    isCompactionInProgress: () => false,
+    steerCurrentTurn: () => { sends++; },
+    sendTextReply: async (text: string) => { replies.push(text); },
+    recordRuntimeEvent: (_category: string, error: unknown) => { errors.push(error); },
+  };
+  await handleTelegramSteerCommand({ ...base, isCompactionInProgress: () => true });
+  await handleTelegramSteerCommand({ ...base, steerCurrentTurn: undefined });
+  await handleTelegramSteerCommand({ ...base, steerCurrentTurn() {
+    sends++;
+    throw new Error("native delivery uncertain");
+  } });
+  assert.equal(sends, 1, "An unconfirmed attempt cannot retry or fall through to normal prompt delivery");
+  assert.equal(errors.length, 1);
+  assert.deepEqual(replies, [
+    "<b>⏳ Cannot steer during compaction. Wait for it to finish.</b>",
+    "<b>🚫 Steering is unavailable in this Pi runtime.</b>",
+    "<b>⚠️ Steering submission could not be confirmed. It will not be retried automatically.</b>",
   ]);
 });
 
@@ -5188,6 +5258,9 @@ test("Command helpers execute command actions through provided handlers", async 
     },
     handleContinue: async () => {
       events.push("continue");
+    },
+    handleSteer: async (_message: unknown, _ctx: unknown, instruction: string) => {
+      events.push(`steer:${instruction}`);
     },
     handleQueue: async () => {
       events.push("queue");

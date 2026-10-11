@@ -10,7 +10,7 @@ import { basename, dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import * as Bus from "./bus.ts";
 import * as Commands from "./commands.ts";
-import type { TelegramConfigStore } from "./config.ts";
+import type { TelegramConfigStore, TelegramInputMode } from "./config.ts";
 import type { TelegramInboundHandlerRuntime } from "./inbound.ts";
 import type {
   TelegramUpdateJournalQueuedCompletion,
@@ -1445,6 +1445,9 @@ export interface TelegramInboundRouteRuntimeDeps<
   TContext,
   TModel extends Model.MenuModel,
 > {
+  getInputMode?: (target: { chatId: number; threadId?: number }) => TelegramInputMode;
+  refreshInputMode?: () => Promise<void>;
+  setInputMode?: (target: { chatId: number; threadId?: number }, mode: TelegramInputMode, isCurrent: () => boolean) => Promise<void>;
   configStore: Pick<
     TelegramConfigStore,
     "get" | "getAllowedUserId" | "persistAllowedUserId" | "persist"
@@ -1706,7 +1709,7 @@ export interface TelegramInboundRouteRuntimeDeps<
   ) => Promise<void>;
   setModel: (model: TModel) => Promise<boolean>;
   sendUserMessage?: (
-    message: string,
+    message: string | Queue.PendingTelegramTurn["content"],
     options?: Queue.TelegramPromptDeliveryOptions,
   ) => void;
   isIdle: (ctx: TContext) => boolean;
@@ -1892,6 +1895,7 @@ export function createTelegramInboundRouteRuntime<
         expandedSha256: string;
       };
       continueCommand?: Commands.ParsedTelegramCommand;
+      steerCommand?: Commands.ParsedTelegramCommand;
       menuCommand?: Commands.ParsedTelegramCommand;
       abortCommand?: Commands.ParsedTelegramCommand;
       nextCommand?: Commands.ParsedTelegramCommand;
@@ -4352,6 +4356,7 @@ export function createTelegramInboundRouteRuntime<
     journalBindingKey?: string,
   ): void => {
     if (!journalBindingKey) return;
+    commandHandler.onSourceCompleted(updateId, ctx, journalBindingKey);
     observeRestoreSettlement(
       {
         kind: "source",
@@ -4452,6 +4457,13 @@ export function createTelegramInboundRouteRuntime<
       Media.extractFirstTelegramMessageText([...messages]),
     );
     return command?.name === "continue" ? command : undefined;
+  };
+  const getLiveRebindSteer = (messages: readonly TMessage[]) => {
+    if (messages.length !== 1 || !deps.sendUserMessage) return undefined;
+    const command = Commands.parseTelegramCommand(
+      Media.extractFirstTelegramMessageText([...messages]),
+    );
+    return command?.name === "steer" ? command : undefined;
   };
   const getLiveRebindTemplate = (messages: readonly TMessage[]) => {
     if (messages.length !== 1) return undefined;
@@ -4661,6 +4673,11 @@ export function createTelegramInboundRouteRuntime<
         isDeepStrictEqual(
           getLiveRebindContinue(selection.messages),
           selection.continueCommand,
+        )) &&
+      (!selection.steerCommand ||
+        isDeepStrictEqual(
+          getLiveRebindSteer(selection.messages),
+          selection.steerCommand,
         ));
     const recipient = {
       kind: isLeader ? ("leader" as const) : ("follower" as const),
@@ -4710,6 +4727,9 @@ export function createTelegramInboundRouteRuntime<
         [
           ...Bus.TELEGRAM_BUS_LIVE_REBIND_CAPABILITIES,
           ...(heldSelected ? Bus.TELEGRAM_BUS_HELD_COMMAND_CAPABILITIES : []),
+          ...(heldSelected?.name === "steer"
+            ? [Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_STEER]
+            : []),
         ].every((cap) => Bus.hasTelegramBusCapability(live.protocol, cap)) &&
         !!live.target &&
         live.target.chatId === binding.target.chatId &&
@@ -4889,6 +4909,16 @@ export function createTelegramInboundRouteRuntime<
         retargetedOriginal(),
         ctx,
         selectedPorts("stop"),
+      );
+    const steer =
+      isLeader &&
+      selection.steerCommand &&
+      source &&
+      commandHandler.prepareSelectedCommand(
+        selection.steerCommand,
+        retargetedOriginal(),
+        ctx,
+        selectedPorts("steer"),
       );
     const help =
       isLeader &&
@@ -5174,6 +5204,7 @@ export function createTelegramInboundRouteRuntime<
         (selection.abortCommand && !abort) ||
         (selection.nextCommand && !next) ||
         (selection.stopCommand && !stop) ||
+        (selection.steerCommand && !steer) ||
         (selection.helpCommand && !help) ||
         (selection.nameCommand && !name) ||
         (selection.confirmationCommand && !confirmation))
@@ -5184,6 +5215,7 @@ export function createTelegramInboundRouteRuntime<
       abort ||
       next ||
       stop ||
+      steer ||
       help ||
       name ||
       confirmation ||
@@ -5380,9 +5412,11 @@ export function createTelegramInboundRouteRuntime<
                                       ? `live-rebind-selected-${selection.helpCommand!.name}`
                                       : stop
                                         ? "live-rebind-selected-stop"
-                                        : next
-                                          ? "live-rebind-selected-next"
-                                          : abort
+                                        : steer
+                                          ? "live-rebind-selected-steer"
+                                          : next
+                                            ? "live-rebind-selected-next"
+                                            : abort
                                             ? "live-rebind-selected-abort"
                                             : "live-rebind-selected-menu",
                             });
@@ -8528,6 +8562,11 @@ export function createTelegramInboundRouteRuntime<
       (parsed.useNewSlot && useLiveRebind && pending.dispatchKind === "command"
         ? getLiveRebindContinue(pending.messages)
         : undefined);
+    const liveSteer =
+      pending.liveRebind?.steerCommand ??
+      (parsed.useNewSlot && useLiveRebind && pending.dispatchKind === "command"
+        ? getLiveRebindSteer(pending.messages)
+        : undefined);
     const liveMenu =
       pending.liveRebind?.menuCommand ??
       (parsed.useNewSlot && useLiveRebind && pending.dispatchKind === "command"
@@ -8599,6 +8638,7 @@ export function createTelegramInboundRouteRuntime<
           (record.owner?.kind === "leader"
             ? !liveTemplate &&
               !liveContinue &&
+              !liveSteer &&
               !liveMenu &&
               !liveAbort &&
               !liveNext &&
@@ -8653,6 +8693,7 @@ export function createTelegramInboundRouteRuntime<
           messages: [...pending.messages],
           template: liveTemplate,
           continueCommand: liveContinue,
+          steerCommand: liveSteer,
           menuCommand: liveMenu,
           abortCommand: liveAbort,
           nextCommand: liveNext,
@@ -8754,7 +8795,9 @@ export function createTelegramInboundRouteRuntime<
                         ? `Command source disposal confirmed; ${selection.menuCommand ? "menu" : "reply"} delivery and old-Thread cleanup are not confirmed`
                         : selection.coordinator?.selectedCommandReference()
                           ? "Command source disposal confirmed; recipient command effects and old-Thread cleanup are not confirmed"
-                          : "Input queued in the rebound Thread; old-Thread cleanup is scheduled, not confirmed",
+                          : selection.steerCommand
+                            ? "Command source disposal confirmed; steering submission, reply delivery and old-Thread cleanup are not confirmed"
+                            : "Input queued in the rebound Thread; old-Thread cleanup is scheduled, not confirmed",
         assertExecutionCurrent,
         true,
       );
@@ -9440,6 +9483,15 @@ export function createTelegramInboundRouteRuntime<
       Updates.assertTelegramUpdateExecutionCurrent(message);
     },
     hasAbortHandler: deps.bridgeRuntime.abort.hasHandler,
+    getAbortHandler: deps.bridgeRuntime.abort.getHandler,
+    getSessionGeneration: deps.getSessionGeneration,
+    getInputMode: deps.getInputMode,
+    refreshInputMode: deps.refreshInputMode,
+    setInputMode: deps.setInputMode,
+    sendModePrompt: deps.sendUserMessage ? (content, ctx) => {
+      if (deps.isIdle(ctx)) deps.sendUserMessage!(content);
+      else deps.sendUserMessage!(content, { deliverAs: "steer" });
+    } : undefined,
     clearPendingModelSwitch: deps.modelSwitchController.clearPendingSwitch,
     hasQueuedTelegramItems: deps.telegramQueueStore.hasQueuedItems,
     clearQueuedTelegramItems: deps.queueMutationRuntime.clear,
@@ -9467,6 +9519,17 @@ export function createTelegramInboundRouteRuntime<
     startTypingLoop: deps.startTypingLoop,
     stopTypingLoop: deps.stopTypingLoop,
     enqueueContinueTurn,
+    steerCurrentTurn: deps.sendUserMessage
+      ? (message, _ctx, instruction) => {
+          Updates.assertTelegramUpdateExecutionCurrent(message);
+          deps.sendUserMessage!(
+            `${Turns.createTelegramTurnPrefix({
+              thread: resolveTelegramThreadLabel(message),
+            })} ${instruction}`,
+            { deliverAs: "steer" },
+          );
+        }
+      : undefined,
     heldTurn: {
       templates: {
         getCommands: getPromptTemplateCommands,
@@ -10804,6 +10867,26 @@ export function createTelegramInboundRouteRuntime<
           caption: undefined,
         } as TMessage),
       enqueueTurn: async (messages, ctx) => {
+        const target = Updates.getTelegramMessageTarget(messages[0]!);
+        await deps.refreshInputMode?.();
+        Updates.assertTelegramUpdateExecutionCurrent(messages[0]);
+        const steer = !!target && deps.getInputMode?.(target) === "steer" &&
+          !deps.isIdle(ctx) && deps.bridgeRuntime.abort.hasHandler() &&
+          !deps.bridgeRuntime.lifecycle.isCompactionInProgress() && !!deps.sendUserMessage;
+        if (steer) {
+          // Preserve the regular inbound handlers, reply context and image content, but never fold waiting work.
+          const generation = deps.getSessionGeneration?.();
+          const abortHandler = deps.bridgeRuntime.abort.getHandler();
+          const prepared = await preparePromptTurn(messages, ctx);
+          Updates.assertTelegramUpdateExecutionCurrent(messages[0]);
+          if (deps.isContextActive?.(ctx) === false || deps.getSessionGeneration?.() !== generation ||
+              (!deps.isIdle(ctx) && deps.bridgeRuntime.abort.getHandler() !== abortHandler))
+            throw new Error("Steering input lost its captured session/run during preparation.");
+          const turn = prepared([]);
+          if (!commandHandler.recordModePrompt(messages, ctx, turn.content))
+            throw new Error("Steering mode requires exact source settlement authority.");
+          return;
+        }
         await promptEnqueue(messages, ctx);
       },
     });

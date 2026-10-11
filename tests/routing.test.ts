@@ -3791,6 +3791,233 @@ test("Inbound bus projection owns target authority and local labels", () => {
   );
 });
 
+test("Routing runtime sends /steer through Pi native steering without changing FIFO queue", async () => {
+  const sent: Array<{ message: unknown; deliverAs?: string }> = [];
+  const harness = createRouteHarness({
+    isIdle: () => false,
+    sendUserMessage: (message, options) => {
+      sent.push({ message, deliverAs: options?.deliverAs });
+    },
+  });
+  assert.equal(typeof harness.routingDeps.sendUserMessage, "function");
+  harness.bridgeRuntime.abort.setHandler(() => {});
+  const queued = {
+    kind: "prompt" as const,
+    chatId: 100,
+    replyToMessageId: 10,
+    sourceMessageIds: [10],
+    queueOrder: 1,
+    queueLane: "default" as const,
+    laneOrder: 1,
+    queuedAttachments: [],
+    content: [{ type: "text" as const, text: "[telegram] queued first" }],
+    historyText: "queued first",
+    statusSummary: "queued first",
+  };
+  harness.telegramQueueStore.setQueuedItems([queued]);
+
+  await harness.routeRuntime.handleUpdate(
+    {
+      update_id: 44,
+      message: {
+        message_id: 44,
+        chat: { id: 100, type: "private" },
+        from: { id: 7, is_bot: false },
+        text: "/steer focus on tests",
+      },
+    },
+    { cwd: "/repo" },
+  );
+
+  assert.deepEqual(
+    sent,
+    [{ message: "[telegram] focus on tests", deliverAs: "steer" }],
+    JSON.stringify(harness.events),
+  );
+  assert.deepEqual(harness.telegramQueueStore.getQueuedItems(), [queued]);
+  assert.equal(
+    harness.events.includes("reply:<b>🧭 Steering request recorded; Pi acceptance is not confirmed.</b>"),
+    true,
+  );
+});
+
+for (const fault of ["current", "commit-failure", "native-throw", "reply-lost", "context-replaced", "idle-before-send", "session-replaced", "run-replaced"] as const) {
+  test(`Durable steering waits for exact source settlement and never reissues (${fault})`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "steer-source-"));
+    const options = { path: join(dir, "journal.json"), botIdentity: Journal.createTelegramUpdateJournalBotIdentity({ botToken: "steer-fixture" }) };
+    const journal = Journal.createTelegramUpdateJournalStore(options), key = Journal.createTelegramUpdateJournalBindingKey(options);
+    const ctx = { cwd: "/repo" }, events: string[] = [];
+    let contextCurrent = true, idle = false, generation = 1;
+    const harness = createRouteHarness({
+      getSessionGeneration: () => generation,
+      isIdle: () => idle,
+      isContextActive: value => value === ctx && contextCurrent,
+      getLocalThreadLabelForTarget: () => "Worker B",
+      getAdmissionJournalBinding: () => key,
+      sendUserMessage(text, delivery) {
+        events.push(`send:${delivery?.deliverAs}:${text}`);
+        if (fault === "native-throw") throw new Error("native send unknown");
+      },
+      async sendTextReply() {
+        if (fault === "reply-lost") throw new Error("reply response lost");
+      },
+    });
+    harness.bridgeRuntime.abort.setHandler(() => assert.fail("Steer cannot abort"));
+    const worker = Updates.createTelegramUpdateAdmissionWorkerRuntime<Journal.TelegramJournaledUpdate, typeof ctx>({
+      journal: { ...journal, removeCompleted(updateIds) {
+        events.push("commit");
+        if (fault === "commit-failure") throw new Error("journal commit refused");
+        const result = journal.removeCompleted(updateIds);
+        if (fault === "context-replaced") contextCurrent = false;
+        if (fault === "idle-before-send") idle = true;
+        if (fault === "session-replaced") generation++;
+        if (fault === "run-replaced") harness.bridgeRuntime.abort.setHandler(() => {});
+        return result;
+      } },
+      getJournalBindingKey: () => key,
+      hasAuthority: () => true,
+      isContextCurrent: value => value === ctx,
+      async defaultHandle(update, context, execution) {
+        await harness.routeRuntime.handleUpdate(update as TestUpdate, context, execution);
+        assert.equal(events.some(value => value.startsWith("send:")), false, "Handler admission is not native issuance");
+      },
+      onUpdateCompleted(updateId, context, binding) {
+        harness.routeRuntime.onUpdateCompleted(updateId, context, binding);
+      },
+    });
+    try {
+      journal.appendBatch([{ update_id: 100, message: { message_id: 100, message_thread_id: 42,
+        chat: { id: 7, type: "private" }, from: { id: 7, is_bot: false }, text: "/steer focus on tests" } }]);
+      worker.start(ctx); await worker.waitForDrain();
+      const shouldSend = !["commit-failure", "context-replaced", "idle-before-send", "session-replaced", "run-replaced"].includes(fault);
+      assert.deepEqual(events, ["commit", ...(shouldSend ? ["send:steer:[telegram|thread:Worker B] focus on tests"] : [])],
+        JSON.stringify({ events: harness.events, worker: worker.getState() }));
+      assert.equal(journal.read().entries.length, fault === "commit-failure" ? 1 : 0);
+      // A failed commit supplies no completion ACK; foreign/stale observations cannot issue the pending send.
+      harness.routeRuntime.onUpdateCompleted(100, ctx, "foreign-binding");
+      if (fault !== "commit-failure") harness.routeRuntime.onUpdateCompleted(100, ctx, key);
+      assert.equal(events.filter(value => value.startsWith("send:")).length, shouldSend ? 1 : 0, "Repeated completion cannot issue again");
+      assert.deepEqual(harness.telegramQueueStore.getQueuedItems(), []);
+    } finally { await worker.stop(); await rm(dir, { recursive: true, force: true }); }
+  });
+}
+
+for (const modeCase of ["busy-steer", "idle-steer", "followup", "compacting", "commit-failure", "native-throw", "ended-before-send", "replaced-before-send", "repeat-steer"] as const) {
+  test(`Configured input mode handles ordinary Telegram messages (${modeCase})`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mode-source-"));
+    const options = { path: join(dir, "journal.json"), botIdentity: Journal.createTelegramUpdateJournalBotIdentity({ botToken: "mode-fixture" }) };
+    const journal = Journal.createTelegramUpdateJournalStore(options), key = Journal.createTelegramUpdateJournalBindingKey(options);
+    const ctx = { cwd: "/repo" }, sends: unknown[] = [], events: string[] = [];
+    let idle = modeCase === "idle-steer", generation = 1;
+    const harness = createRouteHarness({
+      getInputMode: () => modeCase === "followup" ? "followUp" : "steer",
+      isIdle: () => idle,
+      getSessionGeneration: () => generation,
+      isContextActive: () => true,
+      getAdmissionJournalBinding: () => key,
+      sendUserMessage(content, delivery) {
+        events.push("send"); sends.push({ content, delivery });
+        if (modeCase === "native-throw") throw new Error("unconfirmed send");
+      },
+    });
+    harness.bridgeRuntime.abort.setHandler(() => assert.fail("Mode cannot abort"));
+    if (modeCase === "compacting") harness.bridgeRuntime.lifecycle.setCompactionInProgress(true);
+    const worker = Updates.createTelegramUpdateAdmissionWorkerRuntime<Journal.TelegramJournaledUpdate, typeof ctx>({
+      journal: { ...journal, removeCompleted(ids) {
+        events.push("commit");
+        if (modeCase === "commit-failure") throw new Error("commit refused");
+        const result = journal.removeCompleted(ids);
+        if (modeCase === "ended-before-send") idle = true;
+        if (modeCase === "replaced-before-send") generation++;
+        return result;
+      } },
+      getJournalBindingKey: () => key, hasAuthority: () => true, isContextCurrent: () => true,
+      defaultHandle: (update, context, execution) => harness.routeRuntime.handleUpdate(update as TestUpdate, context, execution),
+      onUpdateCompleted: (id, context, binding) => harness.routeRuntime.onUpdateCompleted(id, context, binding),
+    });
+    try {
+      journal.appendBatch([{ update_id: 100, message: { message_id: 100, message_thread_id: 42,
+        chat: { id: 7, type: "private" }, from: { id: 7, is_bot: false }, text: "focus on tests" } }]);
+      worker.start(ctx); await worker.waitForDrain();
+      const native = ["busy-steer", "native-throw", "ended-before-send", "repeat-steer"].includes(modeCase);
+      assert.equal(sends.length, native ? 1 : 0, JSON.stringify({ events, harness: harness.events, worker: worker.getState() }));
+      if (native) {
+        assert.deepEqual(events, ["commit", "send"]);
+        assert.equal((sends[0] as { delivery?: { deliverAs: string } }).delivery?.deliverAs,
+          modeCase === "ended-before-send" ? undefined : "steer");
+        assert.match(JSON.stringify(sends[0]), /focus on tests/);
+        harness.routeRuntime.onUpdateCompleted(100, ctx, key);
+        assert.equal(sends.length, 1);
+        if (modeCase === "repeat-steer") {
+          journal.appendBatch([{ update_id: 101, message: { message_id: 101, message_thread_id: 42,
+            chat: { id: 7, type: "private" }, from: { id: 7, is_bot: false }, text: "second correction" } }]);
+          worker.signal(); await worker.waitForDrain();
+          assert.equal(sends.length, 2);
+        }
+      }
+      assert.equal(harness.telegramQueueStore.getQueuedItems().length,
+        ["idle-steer", "followup", "compacting"].includes(modeCase) ? 1 : 0);
+    } finally { await worker.stop(); await rm(dir, { recursive: true, force: true }); }
+  });
+}
+
+test("Configured steering groups settle every original before sending prepared attachment context once", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "mode-album-"));
+  const options = { path: join(dir, "journal.json"), botIdentity: Journal.createTelegramUpdateJournalBotIdentity({ botToken: "album-fixture" }) };
+  const journal = Journal.createTelegramUpdateJournalStore(options), key = Journal.createTelegramUpdateJournalBindingKey(options);
+  const ctx = { cwd: "/repo" }, sends: unknown[] = [];
+  const groups = Media.createTelegramMediaGroupController<TestMessage, TestContext>();
+  const harness = createRouteHarness({ getInputMode: () => "steer", isIdle: () => false,
+    isContextActive: () => true, getAdmissionJournalBinding: () => key, mediaGroupRuntime: groups,
+    downloadFile: async () => { const path = join(dir, "photo.jpg"); await writeFile(path, Buffer.from([0xff, 0xd8, 0xff, 0xd9])); return path; },
+    processInbound: async (files, rawText) => ({ rawText, promptFiles: files, handledFiles: [], handlerOutputs: ["processed attachment"] }),
+    sendUserMessage(content, delivery) {
+      assert.equal(journal.read().entries.length, 0, "Every grouped source must be removed first");
+      sends.push({ content, delivery });
+    },
+  });
+  harness.bridgeRuntime.abort.setHandler(() => assert.fail("Album cannot abort"));
+  const worker = Updates.createTelegramUpdateAdmissionWorkerRuntime<Journal.TelegramJournaledUpdate, typeof ctx>({
+    journal, getJournalBindingKey: () => key, hasAuthority: () => true, isContextCurrent: () => true,
+    defaultHandle: (update, context, execution) => harness.routeRuntime.handleUpdate(update as TestUpdate, context, execution),
+    onUpdateCompleted: (id, context, binding) => harness.routeRuntime.onUpdateCompleted(id, context, binding),
+  });
+  try {
+    journal.appendBatch([100, 101].map(id => ({ update_id: id, message: { message_id: id,
+      message_thread_id: 42, chat: { id: 7, type: "private" }, from: { id: 7, is_bot: false },
+      media_group_id: "mode-album", caption: id === 100 ? "inspect these photos" : undefined,
+      photo: [{ file_id: `photo-${id}`, width: 1, height: 1 }] } })));
+    worker.start(ctx); await worker.waitForDrain();
+    assert.equal(sends.length, 0);
+    await groups.flushMessage(100); await worker.waitForDrain();
+    assert.equal(sends.length, 1, JSON.stringify({ events: harness.events, worker: worker.getState() }));
+    assert.match(JSON.stringify(sends), /processed attachment/);
+    assert.match(JSON.stringify(sends), /inspect these photos/);
+    assert.equal(harness.telegramQueueStore.getQueuedItems().length, 0);
+  } finally { groups.clear(); await worker.stop(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test("Routing mode command saves only the current target mode", async () => {
+  let mode: "steer" | "followUp" = "followUp";
+  const saved: unknown[] = [];
+  const harness = createRouteHarness({ getInputMode: () => mode,
+    setInputMode: async (target, value, current) => { assert.equal(current(), true); saved.push(target); mode = value; } });
+  const waiting: Queue.PendingTelegramTurn = { kind: "prompt", chatId: 7, target: { chatId: 7, threadId: 42 },
+    replyToMessageId: 90, queueOrder: 1, queueLane: "default", laneOrder: 1,
+    sourceMessageIds: [90], queuedAttachments: [], statusSummary: "earlier work",
+    historyText: "earlier work", content: [{ type: "text", text: "earlier work" }] };
+  harness.telegramQueueStore.setQueuedItems([waiting]);
+  await harness.routeRuntime.handleUpdate({ update_id: 101, message: { message_id: 101, message_thread_id: 42,
+    chat: { id: 7, type: "private" }, from: { id: 7, is_bot: false }, text: "/mode steer" } }, { cwd: "/repo" });
+  assert.equal(mode, "steer");
+  assert.deepEqual(saved, [{ chatId: 7, threadId: 42, replyToMessageId: 101 }]);
+  assert.deepEqual(harness.telegramQueueStore.getQueuedItems(), [waiting]);
+  await harness.routeRuntime.handleUpdate({ update_id: 102, message: { message_id: 102, message_thread_id: 42,
+    chat: { id: 7, type: "private" }, from: { id: 7, is_bot: false }, text: "/mode followup" } }, { cwd: "/repo" });
+  assert.equal(mode, "followUp");
+  assert.deepEqual(harness.telegramQueueStore.getQueuedItems(), [waiting]);
+});
+
 test("Routing runtime forwards authorized text messages into prompt queueing", async () => {
   const events: string[] = [];
   const model: TestModel = { provider: "test", id: "model" };
@@ -13617,7 +13844,7 @@ for (const mode of ["registration", "process", "executor", "reply-loss", "old-ta
   });
 }
 
-for (const name of ["abort", "stop", "next", "continue", "selected_template"] as const) for (const fault of ["idle", "busy", "unavailable", "missing-cap",
+for (const name of ["abort", "stop", "next", "continue", "selected_template", "steer"] as const) for (const fault of ["idle", "busy", "unavailable", "missing-cap",
   ...(name === "continue" || name === "selected_template" ? ["queue-ack-lost", "scope-lost"] as const : ["reply-lost"] as const),
   ...(name === "selected_template" ? ["template-drift"] as const : []), ...(name === "stop" ? ["discard-refused" as const] : [])] as const) {
   test(`Selected follower control registry holds the saved original, completes semantics and uses only restricted recipient replies (${name}/${fault})`, async () => {
@@ -13635,9 +13862,12 @@ for (const name of ["abort", "stop", "next", "continue", "selected_template"] as
       const ctx = { cwd: "/repo" }, generation = "registration", epoch = "epoch", markups: string[] = [], apiRequests: Record<string, unknown>[] = [];
       let current = true, aborts = 0, clears = 0, nextNotices = 0, activeNotices = 0, donorRemovals = 0, recipientRemovals = 0, prepares = 0, getters = 0, defaults = 0, nonce = 0;
       const delivered = Promise.withResolvers<void>(), originalFetch = globalThis.fetch;
+      const steers: string[] = [];
       const capabilities = [Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_SAVE, Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_APPLY, Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_SETTLE,
-        Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_COMMAND_SET, Bus.TELEGRAM_BUS_CAPABILITY_SELECTED_MENU_DELIVERY]
-        .filter(cap => fault !== "missing-cap" || cap !== Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_COMMAND_SET);
+        Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_COMMAND_SET, Bus.TELEGRAM_BUS_CAPABILITY_SELECTED_MENU_DELIVERY,
+        Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_STEER]
+        .filter(cap => fault !== "missing-cap" || cap !== (name === "steer"
+          ? Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_STEER : Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_COMMAND_SET));
       const protocol = Bus.createTelegramBusProtocolIdentity({ runtimeBuild: "held-abort", capabilities });
       const registration = createTelegramBusFollowerRegistrationState(); registration.setRegistered(true, f.request.binding.target, { slot: "A", generation, leaderProtocol: protocol });
       let harness: ReturnType<typeof createRouteHarness> | undefined;
@@ -13671,6 +13901,10 @@ for (const name of ["abort", "stop", "next", "continue", "selected_template"] as
         clearPendingModelSwitch() {}, abortCurrentTurn() { aborts++; }, setFoldQueuedPromptsIntoHistory() {}, updateStatus() {},
         cancelNextTransitionAnnouncements() {}, clearQueuedTelegramItems() { clears++; if (fault === "discard-refused") throw new Error("Queue discard is unconfirmed"); return 2; },
         hasQueuedTelegramItems: () => fault === "busy", isIdle: () => fault !== "busy",
+        hasPendingMessages: () => false, isCompactionInProgress: () => false,
+        steerCurrentTurn(_message: unknown, context: unknown, instruction: string) {
+          assert.equal(context, ctx); steers.push(instruction);
+        },
         requestNextDispatchAnnouncement() { nextNotices++; }, markActiveTurnNextAbortAnnouncement() { activeNotices++; return true; },
         dispatchNextQueuedTelegramTurn() { assert.fail("The empty/blocked queue cannot dispatch through a held command"); },
         beginCommandEffectWork: publication.beginWork, recordRuntimeEvent() { delivered.resolve(); },
@@ -13752,7 +13986,7 @@ for (const name of ["abort", "stop", "next", "continue", "selected_template"] as
       try {
         sourceWorker.start("source"); await sourceWorker.waitForDrain();
         caller.appendBatch([{ update_id: 100, message: { message_id: 100, message_thread_id: 42, chat: { id: 7, type: "private" }, from: { id: 7, is_bot: false },
-          text: name === "selected_template" ? '/selected_template "quoted argument" tail' : `/${name}` } }]);
+          text: name === "selected_template" ? '/selected_template "quoted argument" tail' : name === "steer" ? "/steer focus on tests" : `/${name}` } }]);
         sourceWorker.signal(); await sourceWorker.waitForDrain();
         await admission.onSessionStart(ctx); await worker.waitForDrain(); await receiver.start(); await leaderRuntime.startPolling({});
         assert.equal(markups.length, 1, "The follower /abort original waits behind one chooser");
@@ -13809,7 +14043,8 @@ for (const name of ["abort", "stop", "next", "continue", "selected_template"] as
         if (willReply) await Promise.race([delivered.promise, new Promise(resolve => setTimeout(resolve, 2000))]);
         for (let i = 0; i < 20 && publication.hasPending(); i++) await new Promise(resolve => setTimeout(resolve, 10));
         assert.equal(getters, 1); assert.equal(prepares, 1); assert.equal(defaults, 0);
-        assert.equal(aborts, fault === "busy" ? 1 : 0, "Control semantics run exactly once on the recipient");
+        assert.equal(aborts, fault === "busy" && name !== "steer" ? 1 : 0, "Steering cannot abort the recipient");
+        assert.deepEqual(steers, name === "steer" && fault === "busy" ? ["focus on tests"] : []);
         assert.equal(clears, name === "stop" ? 1 : 0);
         assert.equal(nextNotices, name === "next" && fault === "busy" ? 1 : 0);
         assert.equal(activeNotices, name === "next" && fault === "busy" ? 1 : 0);
@@ -13820,14 +14055,16 @@ for (const name of ["abort", "stop", "next", "continue", "selected_template"] as
         assert.equal(apiRequests.length, willReply ? 1 : 0, "Only the command's detached reply, never ordinary or repeated delivery");
         if (willReply) {
           assert.equal(apiRequests[0]!.message_thread_id, 42); assert.equal(apiRequests[0]!.parse_mode, "HTML");
-          assert.match(String(apiRequests[0]!.text), name === "next" ? /Queue is empty/ : fault === "busy" ? /Aborted current turn/ : /No active turn/);
+          assert.match(String(apiRequests[0]!.text), name === "next" ? /Queue is empty/ : name === "steer" && fault === "busy" ? /Steering request recorded/ : fault === "busy" ? /Aborted current turn/ : /No active turn/);
           if (name === "stop") assert.match(String(apiRequests[0]!.text), /Cleared 2 queued turns/);
         }
         assert.equal(publication.hasPending(), false); assert.equal(publication.hasUnconfirmed(), fault === "reply-lost");
-        const consequence = name === "next" ? "queue dispatch, transition notices" : name === "stop" ? "recipient command effects" : "reply delivery";
+        const consequence = name === "next" ? "queue dispatch, transition notices" : name === "stop" || name === "steer" ? "recipient command effects" : "reply delivery";
         assert.ok(harness.events.some(event => event.includes(`Command source disposal confirmed; ${consequence} and old-Thread cleanup are not confirmed`)), JSON.stringify(harness.events));
         await click(); await sourceWorker.waitForDrain(); await new Promise(resolve => setImmediate(resolve));
-        assert.equal(aborts, fault === "busy" ? 1 : 0); assert.equal(clears, name === "stop" ? 1 : 0); assert.equal(apiRequests.length, willReply ? 1 : 0); assert.equal(donorRemovals, 1); assert.equal(prepares, 1);
+        assert.equal(aborts, fault === "busy" && name !== "steer" ? 1 : 0);
+        assert.deepEqual(steers, name === "steer" && fault === "busy" ? ["focus on tests"] : [], "Repeated selection cannot steer twice");
+        assert.equal(clears, name === "stop" ? 1 : 0); assert.equal(apiRequests.length, willReply ? 1 : 0); assert.equal(donorRemovals, 1); assert.equal(prepares, 1);
         assert.deepEqual(ledger.read().leases, []); assert.deepEqual(f.store.list(), []);
       } finally {
         globalThis.fetch = originalFetch;

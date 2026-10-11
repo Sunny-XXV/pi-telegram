@@ -70,6 +70,7 @@ const telegramBusProtocolIdentity = Bus.createTelegramCurrentBusProtocolIdentity
     Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_SETTLE,
     Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_COMMAND_SET,
     Bus.TELEGRAM_BUS_CAPABILITY_SELECTED_MENU_DELIVERY,
+    Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_STEER,
 ]);
 // --- Extension Runtime ---
 export default function (pi) {
@@ -894,6 +895,9 @@ export default function (pi) {
         sendInteractiveMessage,
         answerCallbackQuery,
         ...configControls,
+        getTargetInputMode: configControls.getTargetInputMode,
+        setTargetInputMode: configControls.setTargetInputMode,
+        isContextActive: telegramSessionContextStore.isCurrent,
         reviewInactiveThreads: inactiveThreadCleanupReviewRuntime.review,
         getThreadDisplayMode() {
             return threadStore.getBotState().threadMode === "enabled"
@@ -939,6 +943,9 @@ export default function (pi) {
             return (Bus.hasTelegramBusSharedCapabilities(telegramBusProtocolIdentity, follower.protocol, [
                 ...Bus.TELEGRAM_BUS_LIVE_REBIND_CAPABILITIES,
                 ...Bus.TELEGRAM_BUS_HELD_COMMAND_CAPABILITIES,
+                ...(name === "steer"
+                    ? [Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_STEER]
+                    : []),
             ]) &&
                 typeof selectedMenuDelivery === "function" &&
                 typeof inboundRouteRuntime.prepareHeldCommand === "function" &&
@@ -1173,6 +1180,9 @@ export default function (pi) {
         openQueueMenu: queueMenuRuntime.openQueueMenu,
         queueMenuCallbackHandler: queueMenuRuntime.handleCallbackQuery,
         openSettingsMenu: settingsMenuRuntime.openSettingsMenu,
+        getInputMode: configControls.getTargetInputMode,
+        refreshInputMode: configControls.refreshInputMode,
+        setInputMode: configControls.setTargetInputMode,
         settingsMenuCallbackHandler: settingsMenuRuntime.handleCallbackQuery,
         sectionRegistry,
         sendSectionRichMessage,
@@ -1486,6 +1496,8 @@ export default function (pi) {
             if (!Bus.hasTelegramBusCapability(telegramBusProtocolIdentity, Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_COMMAND_SET) ||
                 !Bus.hasTelegramBusCapability(telegramBusProtocolIdentity, Bus.TELEGRAM_BUS_CAPABILITY_SELECTED_MENU_DELIVERY) ||
                 !input.selectedCommand ||
+                (input.selectedCommand.name === "steer" &&
+                    !Bus.hasTelegramBusCapability(telegramBusProtocolIdentity, Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_STEER)) ||
                 !telegramSessionContextStore.isCurrent(ctx) ||
                 followerAdmissionLifecycleRuntime.getJournalBindingKey() !==
                     input.recipientBindingKey)

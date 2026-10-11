@@ -49,6 +49,10 @@ export interface RouteHarnessOptions {
   beginCommandEffectWork?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["beginCommandEffectWork"];
   recordRuntimeEvent?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["recordRuntimeEvent"];
   isIdle?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["isIdle"];
+  sendUserMessage?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["sendUserMessage"];
+  getInputMode?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["getInputMode"];
+  refreshInputMode?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["refreshInputMode"];
+  setInputMode?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["setInputMode"];
   dispatchNextQueuedTelegramTurn?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["dispatchNextQueuedTelegramTurn"];
   requestNextDispatchAnnouncement?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["requestNextDispatchAnnouncement"];
   cancelNextDispatchAnnouncement?: Routing.TelegramInboundRouteRuntimeDeps<TestMessage, TestCallbackQuery, TestContext, TestModel>["cancelNextDispatchAnnouncement"];
@@ -259,6 +263,9 @@ export function createRouteHarness(options: RouteHarnessOptions = {}) {
     temporaryThreadCleanupDelayMs: options.temporaryThreadCleanupDelayMs,
     liveRebindCleanupSchedule: options.liveRebindCleanupSchedule,
     getSessionGeneration: options.getSessionGeneration,
+    getInputMode: options.getInputMode,
+    refreshInputMode: options.refreshInputMode,
+    setInputMode: options.setInputMode,
     foreignOwnedUpdateForwarder: options.foreignOwnedUpdateForwarder,
     getTargetOwnership: options.getTargetOwnership,
     getMessageOwnership: options.getMessageOwnership,
@@ -348,9 +355,9 @@ export function createRouteHarness(options: RouteHarnessOptions = {}) {
     setThinkingLevel: () => undefined,
     isVoiceReplyActive: options.isVoiceReplyActive,
     setModel: async () => true,
-    sendUserMessage: (message, opts) => {
+    sendUserMessage: options.sendUserMessage ?? ((message, opts) => {
       events.push(`user:${message}:${opts?.deliverAs ?? "default"}`);
-    },
+    }),
     isIdle: options.isIdle ?? (() => true),
     hasPendingMessages: () => false,
     compact: () => undefined,

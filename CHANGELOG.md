@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- `Input mode`: Ordinary Telegram prompts now support configurable Follow-up or native Steer delivery via `input.mode`, persistent target overrides, `/mode steer|followup`, and `/start` → Input mode. Idle prompts start normally; switching preserves waiting work. Source removal precedes one native issuance, whose acceptance remains unconfirmed and is never blindly replayed.
+- `Explicit steering`: `/steer <instruction>` offers a single text-only active-run correction without aborting tools or changing waiting prompts. Held cross-instance selection requires the negotiated steering capability and exact source/recipient fences.
+
 ## 0.54.4: Restored tabs take their Pi's name
 
 - `Restore title`: Restoring a Pi into a routing tab ("move Pi into this tab") now renames the tab to that Pi's Thread display title, as Workspace Restore already did; previously a live-rebind Restore left the tab named `🚦 Routing`. A failed rename is recorded and never blocks the Restore.

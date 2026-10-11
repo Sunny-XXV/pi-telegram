@@ -38,6 +38,7 @@ export interface ResolvedTelegramTimeConfig {
 export type TelegramThreadDisplayMode = "letters" | "names" | "directories" | "directory-snake" | "directory-title";
 export declare function resolveTelegramThreadDisplayMode(config: Pick<TelegramConfig, "threadDisplayMode">): TelegramThreadDisplayMode;
 export declare function setTelegramThreadDisplayMode(store: TelegramConfigStore, mode: TelegramThreadDisplayMode, isCurrent: () => boolean): Promise<void>;
+export type TelegramInputMode = "followUp" | "steer";
 export type TelegramAssistantRenderingMode = "rich" | "html";
 export type TelegramActivityVerbosity = "quiet" | "thinking" | "tools" | "verbose";
 export interface TelegramConfig {
@@ -51,6 +52,11 @@ export interface TelegramConfig {
     allowedUserId?: number;
     /** Effective view; persisted under profiles.<name>. */
     threadDisplayMode?: TelegramThreadDisplayMode;
+    /** Default input delivery plus persistent profile/chat/Thread overrides. */
+    input?: {
+        mode?: TelegramInputMode;
+        targets?: Record<string, TelegramInputMode>;
+    };
     inboundHandlers?: TelegramInboundHandlerConfig[];
     attachmentHandlers?: TelegramInboundHandlerConfig[];
     outboundHandlers?: TelegramOutboundHandlerConfig[];
@@ -176,7 +182,16 @@ export declare function createTelegramProactivePushTargetGetter(deps: {
     getAssignedTarget: () => TelegramProactivePushTarget | undefined;
     getAllowedUserId: () => number | undefined;
 }): () => TelegramProactivePushTarget | undefined;
-export declare function createTelegramConfigControls(configStore: TelegramMutableConfigStore): {
+export declare function createTelegramConfigControls(configStore: TelegramMutableConfigStore & Partial<Pick<TelegramConfigStore, "getActiveProfileName">>): {
+    getTargetInputMode(target: {
+        chatId: number;
+        threadId?: number;
+    }): TelegramInputMode;
+    refreshInputMode: () => Promise<void>;
+    setTargetInputMode(target: {
+        chatId: number;
+        threadId?: number;
+    }, mode: TelegramInputMode, isCurrent?: () => boolean): Promise<void>;
     areDraftPreviewsEnabled: () => boolean;
     setDraftPreviewsEnabled: (enabled: boolean) => Promise<void>;
     getAssistantRenderingMode: () => TelegramAssistantRenderingMode;

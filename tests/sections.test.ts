@@ -656,13 +656,13 @@ test("buildStatusReplyMarkup includes extension section rows before Settings", a
     (r) => r[0].callback_data === "menu:settings",
   );
   assert.ok(settingsIdx > 0);
-  // Queue should be before section rows
-  assert.equal(rows[settingsIdx - 3][0].text, "⌛ Queue: 0");
-  // Section rows injected between Queue and Settings
-  assert.equal(rows[settingsIdx - 2][0].text, "Explorer");
-  assert.equal(rows[settingsIdx - 2][0].callback_data, "section:0:open");
-  assert.equal(rows[settingsIdx - 1][0].text, "🟢 Status");
-  assert.equal(rows[settingsIdx - 1][0].callback_data, "section:1:open");
+  // Queue and extension rows precede the target input-mode shortcut and Settings.
+  assert.equal(rows[settingsIdx - 4][0].text, "⌛ Queue: 0");
+  assert.equal(rows[settingsIdx - 3][0].text, "Explorer");
+  assert.equal(rows[settingsIdx - 3][0].callback_data, "section:0:open");
+  assert.equal(rows[settingsIdx - 2][0].text, "🟢 Status");
+  assert.equal(rows[settingsIdx - 2][0].callback_data, "section:1:open");
+  assert.equal(rows[settingsIdx - 1][0].callback_data, "settings:open:input-mode");
 });
 
 // --- Integration: menu-settings rows ---

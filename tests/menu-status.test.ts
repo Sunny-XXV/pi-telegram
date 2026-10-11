@@ -26,7 +26,7 @@ test("Status menu reply markup exposes model, thinking, queue, and settings rows
 
   assert.deepEqual(
     markup.inline_keyboard.map((row) => row[0]?.callback_data),
-    ["menu:model", "menu:thinking", "menu:queue", "menu:settings"],
+    ["menu:model", "menu:thinking", "menu:queue", "settings:open:input-mode", "menu:settings"],
   );
   assert.equal(
     markup.inline_keyboard[0]?.[0]?.text.startsWith("🤖 Model"),
@@ -46,7 +46,7 @@ test("Status menu hides thinking row for non-reasoning and voice-active states",
       "off",
       0,
     ).inline_keyboard.map((row) => row[0]?.callback_data),
-    ["menu:model", "menu:queue", "menu:settings"],
+    ["menu:model", "menu:queue", "settings:open:input-mode", "menu:settings"],
   );
   assert.deepEqual(
     buildStatusReplyMarkup(
@@ -56,7 +56,7 @@ test("Status menu hides thinking row for non-reasoning and voice-active states",
       undefined,
       true,
     ).inline_keyboard.map((row) => row[0]?.callback_data),
-    ["menu:model", "menu:queue", "menu:settings"],
+    ["menu:model", "menu:queue", "settings:open:input-mode", "menu:settings"],
   );
 });
 

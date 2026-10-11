@@ -720,7 +720,7 @@ export interface TelegramQueueDispatchWatchdogRuntimeDeps<TContext = unknown> ex
 }
 export declare function createTelegramQueueDispatchWatchdogRuntime<TContext = unknown>(deps: TelegramQueueDispatchWatchdogRuntimeDeps<TContext>): TelegramQueueDispatchWatchdogRuntime<TContext>;
 export interface TelegramPromptDeliveryOptions {
-    deliverAs: "followUp";
+    deliverAs: "steer" | "followUp";
 }
 export interface TelegramDispatchRuntimeDeps<TContext = unknown> {
     executeControlItem: (item: Extract<TelegramQueueDispatchAction<TContext>, {

@@ -80,6 +80,16 @@ test("Thread display Settings offer all automatic modes and gate mutation", asyn
     async updateSettingsMessage(text) { renderedText = text; calls.push("update"); },
     async answerCallbackQuery(_id, text) { calls.push(text ?? "ack"); },
   };
+  let inputMode: "steer" | "followUp" = "followUp";
+  await handleTelegramSettingsMenuCallbackAction("q", "settings:open:input-mode", {
+    ...deps, getInputMode: () => inputMode, setInputMode: async mode => { inputMode = mode; },
+  });
+  assert.match(renderedText, /Input mode/);
+  await handleTelegramSettingsMenuCallbackAction("q", "settings:set:input-mode:steer", {
+    ...deps, getInputMode: () => inputMode, setInputMode: async mode => { inputMode = mode; },
+  });
+  assert.equal(inputMode, "steer");
+  calls.length = 0;
   await handleTelegramSettingsMenuCallbackAction("q", "settings:open:thread-display", deps);
   assert.deepEqual(calls, ["update", "ack"]);
   assert.equal(renderedText, buildThreadDisplaySettingsText("names"));
@@ -446,6 +456,34 @@ test("Settings callback action mutates live settings and retires stale proactive
     `clean:thread-cleanup:${"a".repeat(32)}`,
     "answer:Deleted: 2. Outcome unknown: 0. Blocked: 1. Recovery: cleanup authority unavailable",
   ]);
+});
+
+test("Input mode menu rehydrates the exact Thread target and persists its choice", async () => {
+  const state = { chatId: 7, threadId: 42, messageId: 10, mode: "status" as const,
+    page: 0, scope: "all" as const, scopedModels: [], allModels: [] };
+  let mode: "steer" | "followUp" = "followUp";
+  const saved: unknown[] = [], rendered: unknown[] = [];
+  const runtime = createTelegramSettingsMenuRuntime({
+    getTargetInputMode: target => { assert.deepEqual(target, { chatId: 7, threadId: 42 }); return mode; },
+    setTargetInputMode: async (target, value, current) => { assert.equal(current(), true); saved.push(target); mode = value; },
+    isContextActive: () => true,
+    getModelMenuState: async () => state, getStoredModelMenuState: () => undefined,
+    storeModelMenuState() {},
+    areDraftPreviewsEnabled: () => true, getAssistantRenderingMode: () => "rich", getActivityVerbosity: () => "quiet",
+    getTimeInjectionMode: () => "hidden", getVoiceReplyMode: () => "manual",
+    isVoiceReplyModeConfigured: () => false, isAutomaticThreadCleanupEnabled: () => false,
+    async setDraftPreviewsEnabled() {}, async setAssistantRenderingMode() {},
+    async setActivityVerbosity() {}, async setVoiceReplyMode() {},
+    async setTimeInjectionMode() {}, async setAutomaticThreadCleanupEnabled() {},
+    async editInteractiveMessage(_chat, _id, text, _mode, markup) { rendered.push({ text, markup }); },
+    async sendInteractiveMessage() { return 10; }, async answerCallbackQuery() {},
+  });
+  const message = { chat: { id: 7 }, message_id: 10, message_thread_id: 42 };
+  await runtime.handleCallbackQuery({ id: "open", data: "settings:open:input-mode", message }, {});
+  assert.match(JSON.stringify(rendered), /Input mode/);
+  await runtime.handleCallbackQuery({ id: "set", data: "settings:set:input-mode:steer", message }, {});
+  assert.equal(mode, "steer");
+  assert.deepEqual(saved, [{ chatId: 7, threadId: 42 }]);
 });
 
 test("Settings runtime opens menus and rehydrates stale callback state", async () => {

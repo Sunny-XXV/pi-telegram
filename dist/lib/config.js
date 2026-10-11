@@ -786,7 +786,30 @@ function createTelegramAutomaticThreadCleanupSetter(configStore) {
     };
 }
 export function createTelegramConfigControls(configStore) {
+    const inputTargetKey = (target) => `${configStore.getActiveProfileName?.() ?? TELEGRAM_DEFAULT_PROFILE_NAME}:${target.chatId}:${target.threadId ?? 0}`;
     return {
+        getTargetInputMode(target) {
+            const input = configStore.get().input;
+            const mode = input?.targets?.[inputTargetKey(target)] ?? input?.mode;
+            return mode === "steer" ? "steer" : "followUp";
+        },
+        refreshInputMode: () => loadLatestTelegramConfig(configStore),
+        async setTargetInputMode(target, mode, isCurrent = () => true) {
+            if (mode !== "steer" && mode !== "followUp")
+                throw new Error("Invalid Telegram input mode.");
+            const key = inputTargetKey(target);
+            const current = () => isCurrent() && inputTargetKey(target) === key;
+            await loadLatestTelegramConfig(configStore);
+            if (!current())
+                throw new Error("Telegram input mode lost its originating authority.");
+            const config = configStore.get();
+            await configStore.persist({ ...config, input: {
+                    ...config.input,
+                    targets: { ...config.input?.targets, [key]: mode },
+                } }, { isCurrent: current });
+            if (!current())
+                throw new Error("Telegram input mode changed during persistence.");
+        },
         areDraftPreviewsEnabled: createTelegramDraftPreviewsChecker(configStore),
         setDraftPreviewsEnabled: createTelegramDraftPreviewsSetter(configStore),
         getAssistantRenderingMode: createTelegramAssistantRenderingModeGetter(configStore),

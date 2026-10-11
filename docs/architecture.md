@@ -574,6 +574,8 @@ Long-text split recovery remains conservative: only human text at or above the n
 
 ### Queue And Dispatch Safety
 
+Ordinary-input delivery is configured by `input.mode` plus exact profile/chat/Thread overrides in `input.targets`; `/mode` and `/start` → Input mode persist only the current target. Follow-up retains the existing queue/idle dispatch contract. Steer prepares normal inbound content without folding waiting prompts and records a bounded session-local issuance fence covering every original source. Only the exact worker-removal acknowledgements for the entire group permit one native `deliverAs: "steer"` send in the captured active run, or normal delivery if that same run has ended and Pi is idle. Session/run replacement refuses the send. Compaction and idle admission use the normal queue. These fences are neither a durable restart inbox nor Pi acceptance evidence: unknown sends are not replayed, and removal-before-issuance has an at-most-once loss window. Mode changes do not reclassify queued work or alter control commands.
+
 The bridge keeps its own Telegram queue. The Pi status bar's yellow `+N` suffix projects only executable prompts still waiting: current agent work from Telegram, terminal, or autonomous sources never contributes, and the dispatched Telegram head is subtracted while it remains retained pending `agent_start` consumption.
 
 Queue items have two explicit dimensions:

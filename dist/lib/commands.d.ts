@@ -4,16 +4,16 @@
  * Owns Telegram slash-command normalization, bot command metadata, pi-side command registration, and command-initiated session replacement orchestration behind runtime ports
  */
 import type { TelegramActivityPublicationWork } from "./activity.ts";
-import { type TelegramConfigStore } from "./config.ts";
+import { type TelegramConfigStore, type TelegramInputMode } from "./config.ts";
 import type * as Pi from "./pi.ts";
 import type { ExtensionAPI, ExtensionCommandContext } from "./pi.ts";
 import type { TelegramPromptTemplateCommand } from "./prompt-templates.ts";
-import { createTelegramControlItemBuilder, type PendingTelegramControlItem, type TelegramControlQueueController, type TelegramControlQueueControllerDeps, type TelegramQueueAdmissionReceipt } from "./queue.ts";
+import { createTelegramControlItemBuilder, type PendingTelegramControlItem, type PendingTelegramTurn, type TelegramControlQueueController, type TelegramControlQueueControllerDeps, type TelegramQueueAdmissionReceipt } from "./queue.ts";
 import { type TelegramBridgeStatusLineOptions } from "./status.ts";
 import { type TelegramApiCallOptions } from "./telegram-api.ts";
 import type { TelegramSessionReplacementIntent } from "./threads.ts";
 import { type TelegramDeferredSourceEvidence, type TelegramLiveSourceCompletionReadiness, type TelegramQueueAdmissionReceiptLike } from "./updates.ts";
-export type TelegramHeldCommandName = "status" | "abort" | "stop" | "next" | "continue";
+export type TelegramHeldCommandName = "status" | "abort" | "stop" | "next" | "continue" | "steer";
 /** Commands-owned no-fold admission over the ordinary recipient queue; source reporting stays separate from removal. */
 export interface TelegramHeldTurnAdmission {
     assertCurrent(): void;
@@ -133,6 +133,8 @@ export declare const TELEGRAM_COMMAND_EMOJI: {
     readonly thread: "🧵";
     readonly next: "⏩";
     readonly continue: "▶️";
+    readonly steer: "🧭";
+    readonly mode: "🧭";
     readonly abort: "⏹️";
     readonly stop: "🟥";
     readonly name: "🏷️";
@@ -215,7 +217,7 @@ export declare function createTelegramThreadDisplayNameRenameBinding(): {
     rename: TelegramThreadDisplayNameRenamePort;
 };
 export declare function registerTelegramBridgeCommands(pi: ExtensionAPI, deps: TelegramBridgeCommandRegistrationDeps): void;
-export declare const TELEGRAM_RESERVED_COMMAND_NAMES: readonly ["stop", "name", "new", "abort", "next", "continue", "status", "queue", "compact", "model", "thinking", "settings", "help", "start"];
+export declare const TELEGRAM_RESERVED_COMMAND_NAMES: readonly ["stop", "name", "new", "abort", "next", "continue", "mode", "steer", "status", "queue", "compact", "model", "thinking", "settings", "help", "start"];
 export type TelegramReservedCommandName = (typeof TELEGRAM_RESERVED_COMMAND_NAMES)[number];
 export declare function isTelegramReservedCommandName(commandName: string | undefined): commandName is TelegramReservedCommandName;
 export type TelegramCommandAction = {
@@ -238,6 +240,12 @@ export type TelegramCommandAction = {
     executionMode: "immediate";
 } | {
     kind: "continue";
+    executionMode: "immediate";
+} | {
+    kind: "steer";
+    executionMode: "immediate";
+} | {
+    kind: "mode";
     executionMode: "immediate";
 } | {
     kind: "queue";
@@ -269,6 +277,7 @@ export interface TelegramCommandActionDeps<TMessage, TContext> {
     handleAbort: (message: TMessage, ctx: TContext) => Promise<void>;
     handleNext: (message: TMessage, ctx: TContext) => Promise<void>;
     handleContinue: (message: TMessage, ctx: TContext) => Promise<void>;
+    handleSteer: (message: TMessage, ctx: TContext, instruction: string) => Promise<void>;
     handleQueue: (message: TMessage, ctx: TContext) => Promise<void>;
     handleCompact: (message: TMessage, ctx: TContext) => Promise<void>;
     handleStatus: (message: TMessage, ctx: TContext) => Promise<void>;
@@ -432,6 +441,18 @@ interface TelegramCommandEffectWorkPort {
 }
 export interface TelegramCommandRuntimeDeps<TMessage extends TelegramCommandRuntimeMessage, TContext> extends TelegramRuntimeEventRecorderPort, TelegramCommandEffectWorkPort {
     hasAbortHandler: () => boolean;
+    getAbortHandler?: () => (() => void) | undefined;
+    getSessionGeneration?: () => number;
+    getInputMode?: (target: {
+        chatId: number;
+        threadId?: number;
+    }) => TelegramInputMode;
+    refreshInputMode?: () => Promise<void>;
+    setInputMode?: (target: {
+        chatId: number;
+        threadId?: number;
+    }, mode: TelegramInputMode, isCurrent: () => boolean) => Promise<void>;
+    sendModePrompt?: (content: PendingTelegramTurn["content"], ctx: TContext) => void;
     clearPendingModelSwitch: () => void;
     hasQueuedTelegramItems: () => boolean;
     clearQueuedTelegramItems: (ctx: TContext) => number;
@@ -458,6 +479,8 @@ export interface TelegramCommandRuntimeDeps<TMessage extends TelegramCommandRunt
     }) => void;
     stopTypingLoop?: () => void;
     enqueueContinueTurn: (message: TMessage, ctx: TContext) => Promise<void>;
+    steerCurrentTurn?: (message: TMessage, ctx: TContext, instruction: string) => void;
+    getAdmissionJournalBinding?: () => string | undefined;
     heldTurn?: {
         enqueue(message: TMessage, ctx: TContext, kind: "continue" | "prompt", admission: TelegramHeldTurnAdmission): Promise<void>;
         templates?: {
@@ -533,6 +556,14 @@ export declare const TELEGRAM_COMMAND_ACTIONS: {
         readonly kind: "continue";
         readonly executionMode: "immediate";
     };
+    readonly mode: {
+        readonly kind: "mode";
+        readonly executionMode: "immediate";
+    };
+    readonly steer: {
+        readonly kind: "steer";
+        readonly executionMode: "immediate";
+    };
     readonly status: {
         readonly kind: "status";
         readonly executionMode: "immediate";
@@ -600,6 +631,17 @@ export declare function handleTelegramNextCommand(deps: {
         parseMode?: "HTML";
     }) => Promise<void>) | undefined;
 }): Promise<void>;
+export declare function handleTelegramSteerCommand(deps: {
+    instruction: string;
+    hasAbortHandler: () => boolean;
+    isIdle: () => boolean;
+    isCompactionInProgress: () => boolean;
+    steerCurrentTurn?: (instruction: string) => void;
+    recordRuntimeEvent?: TelegramRuntimeEventRecorderPort["recordRuntimeEvent"];
+    sendTextReply: (text: string, options?: {
+        parseMode?: "HTML";
+    }) => Promise<void>;
+}): Promise<void>;
 export declare function openTelegramNewConfirmation(target: TelegramCommandMessageTarget, deps: TelegramCompactConfirmationDeps, assertAuthority?: TelegramApiCallOptions["assertAuthority"]): Promise<void>;
 export declare function handleTelegramNewConfirmationCallback<TContext>(query: TelegramCompactConfirmationCallbackQuery, deps: TelegramNewConfirmationCallbackDeps<TContext>): Promise<boolean>;
 export declare function handleTelegramCompactConfirmationCallback<TContext>(query: TelegramCompactConfirmationCallbackQuery, deps: TelegramCompactConfirmationCallbackDeps<TContext>): Promise<boolean>;
@@ -629,6 +671,10 @@ export interface TelegramSelectedCommandAdmission {
     reportCompleted(): boolean;
 }
 export declare function createTelegramCommandHandler<TMessage extends TelegramCommandRuntimeMessage, TContext>(deps: TelegramCommandRuntimeDeps<TMessage, TContext>): ((commandName: string | undefined, message: TMessage, ctx: TContext, commandArgs?: string) => Promise<boolean>) & {
+    /** Prepared ordinary input keeps images/context; every original must settle before one native issuance. */
+    recordModePrompt(messages: TMessage[], ctx: TContext, content: PendingTelegramTurn["content"]): boolean;
+    /** Exact journal removal ACK, not a semantic report or native Pi acceptance. */
+    onSourceCompleted(updateId: number, ctx: TContext, journalBindingKey?: string): void;
     /** Command-only producer execution; Routing must supply the captured plan and released exact-source authority. */
     prepareSelectedExtensionCommand(prepared: NonNullable<Awaited<ReturnType<typeof prepareTelegramSelectedExtensionCommand>>>, messages: readonly TMessage[], ctx: TContext, admission: TelegramSelectedCommandAdmission): (() => Promise<void>) | undefined;
     /** Selected help/start require the existing authenticated owner; cold pairing remains ordinary first contact. */

@@ -156,6 +156,9 @@ export const TELEGRAM_BUS_CAPABILITY_SESSION_REPLACEMENT_INTENT =
   "session-replacement-intent-v1" as const;
 export const TELEGRAM_BUS_CAPABILITY_WORKSPACE_RESTORE =
   "workspace-restore-v1" as const;
+/** Shared Workspace readers understand independent pre-dispatch input/cleanup state. */
+export const TELEGRAM_BUS_CAPABILITY_PRE_DISPATCH_REBIND = "live-rebind-pre-dispatch-reader-v2" as const;
+export const TELEGRAM_BUS_CAPABILITY_PRE_DISPATCH_REBIND_EXECUTION = "live-rebind-pre-dispatch-v1" as const;
 export const TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_SAVE =
   "live-thread-rebind-save-v1" as const;
 export const TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_APPLY =
@@ -668,12 +671,6 @@ function hasTelegramBusDeliveryMarker(
   );
 }
 
-export function markTelegramBusAggregateDelivery<
-  T extends Record<string, unknown>,
->(body: T): T {
-  return { ...body, [TELEGRAM_BUS_AGGREGATE_DELIVERY_FIELD]: true };
-}
-
 export function markTelegramBusCrossTargetDelivery<
   T extends Record<string, unknown>,
 >(body: T): T {
@@ -790,7 +787,7 @@ export function isTelegramFollowerApiCallAllowed(input: {
     if (apiMethod === "setMyCommands")
       return isBotCommandRegistration(input.args[1]);
     if (apiMethod === "sendChatAction")
-      return isTargetChatScoped(input.args[1]);
+      return isTargetScoped(input.args[1]);
     if (
       apiMethod === "sendMessage" &&
       hasTelegramBusDeliveryMarker(
@@ -798,8 +795,7 @@ export function isTelegramFollowerApiCallAllowed(input: {
         TELEGRAM_BUS_AGGREGATE_DELIVERY_FIELD,
       )
     ) {
-      const body = input.args[1] as Record<string, unknown>;
-      return body.message_thread_id === undefined && isTargetChatScoped(body);
+      return false;
     }
     if (
       (apiMethod === "sendMessage" || apiMethod === "sendRichMessage") &&
@@ -1159,7 +1155,7 @@ export type TelegramBusEnvelope = (
       recipientBindingKey: string;
       operationId: string;
       sourceUpdateIds: number[];
-      mode: "release" | "discard" | "observe" | "observe-command";
+      mode: "release" | "discard" | "observe" | "observe-held" | "observe-command";
       oldTarget?: TelegramTarget & { threadId: number };
       preparedSource?: TelegramBusPreparedCommandSource;
       selectedCommand?: TelegramBusSelectedCommandInput;
@@ -1495,7 +1491,8 @@ export function parseTelegramBusEnvelope(
         ]) ||
         (Object.hasOwn(value, "preparedSource") && !selectedCommand) ||
         (value.mode === "observe-command" &&
-          (!selectedCommand || Object.hasOwn(value, "oldTarget")))
+          (!selectedCommand || Object.hasOwn(value, "oldTarget"))) ||
+        (value.mode === "observe-held" && (parseThreadTarget(value.oldTarget)?.threadId ?? 0) <= 0)
       )
         break;
       if (
@@ -1516,7 +1513,7 @@ export function parseTelegramBusEnvelope(
           : value.mode === "release" ||
             value.mode === "discard" ||
             value.mode === "observe-command" ||
-            (value.mode === "observe" &&
+            ((value.mode === "observe" || value.mode === "observe-held") &&
               !!parseThreadTarget(value.oldTarget))) &&
         isUniqueSourceUpdateIds(value.sourceUpdateIds) &&
         typeof value.sentAtMs === "number" &&
@@ -1533,9 +1530,10 @@ export function parseTelegramBusEnvelope(
             | "release"
             | "discard"
             | "observe"
+            | "observe-held"
             | "observe-command",
           sentAtMs: value.sentAtMs,
-          ...(value.mode === "observe"
+          ...((value.mode === "observe" || value.mode === "observe-held")
             ? { oldTarget: parseThreadTarget(value.oldTarget)! }
             : {}),
           ...(selectedCommand ? { selectedCommand, preparedSource } : {}),
@@ -2420,6 +2418,7 @@ export function createTelegramBusLiveRebindController(deps: {
             | "release"
             | "discard"
             | "observe"
+            | "observe-held"
             | "observe-command";
           sourceUpdateIds: number[];
           slot: string;
@@ -2463,6 +2462,7 @@ export function createTelegramBusLiveRebindController(deps: {
           "release",
           "discard",
           "observe",
+          "observe-held",
           "observe-command",
         ].includes(input.mode) ||
           (input.mode === "observe-command" && !selectedCommand)))
@@ -2508,7 +2508,8 @@ export function createTelegramBusLiveRebindController(deps: {
           }
         : { updates: input.updates }),
     });
-    const observing = "mode" in expected && expected.mode === "observe";
+    const observing = "mode" in expected && (expected.mode === "observe" || expected.mode === "observe-held");
+    const observingHeld = "mode" in expected && expected.mode === "observe-held";
     const commandObserving =
       "mode" in expected && expected.mode === "observe-command";
     const settling =
@@ -2523,6 +2524,7 @@ export function createTelegramBusLiveRebindController(deps: {
         ? [TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_APPLY]
         : []),
       ...(settling || held ? [TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_SETTLE] : []),
+      ...(observingHeld ? [TELEGRAM_BUS_CAPABILITY_PRE_DISPATCH_REBIND_EXECUTION] : []),
       ...(held
         ? [
             TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_COMMAND_SET,
@@ -2641,7 +2643,7 @@ export function createTelegramBusLiveRebindController(deps: {
             ? {
                 kind: "leader.settleLiveRebind" as const,
                 mode: expected.mode as
-                  "release" | "discard" | "observe" | "observe-command",
+                  "release" | "discard" | "observe" | "observe-held" | "observe-command",
                 sourceUpdateIds: expected.sourceUpdateIds!,
                 ...(observing ? { oldTarget: expected.oldTarget } : {}),
               }

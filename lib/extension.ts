@@ -70,6 +70,8 @@ const telegramBusProtocolIdentity =
     Bus.TELEGRAM_BUS_CAPABILITY_DIRECTORY_DISPLAY_FORMAT,
     Bus.TELEGRAM_BUS_CAPABILITY_SESSION_REPLACEMENT_INTENT,
     Bus.TELEGRAM_BUS_CAPABILITY_WORKSPACE_RESTORE,
+    Bus.TELEGRAM_BUS_CAPABILITY_PRE_DISPATCH_REBIND,
+    Bus.TELEGRAM_BUS_CAPABILITY_PRE_DISPATCH_REBIND_EXECUTION,
     Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_SAVE,
     Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_APPLY,
     Bus.TELEGRAM_BUS_CAPABILITY_LIVE_REBIND_SETTLE,
@@ -390,10 +392,6 @@ export default function (pi: Pi.ExtensionAPI) {
     buttonActionStore,
     configControls.getAssistantRenderingMode,
   );
-  const pendingModelSwitchStore =
-    Model.createPendingModelSwitchStore<
-      Model.ScopedTelegramModel<ActivePiModel>
-    >();
   const modelMenuRuntime = Menu.createTelegramModelMenuRuntime<ActivePiModel>();
   const sectionRegistry = Sections.createAndBindTelegramSectionRegistry();
 
@@ -425,8 +423,25 @@ export default function (pi: Pi.ExtensionAPI) {
     rawTelegramQueueStore,
     telegramTransportStampRuntime.getStamp,
   );
+  const captureCleanupDrain = Lifecycle.createTelegramSessionDrainObserver({
+    context: telegramSessionContextStore,
+    captureAuthority() {
+      const epoch = getCurrentLeaderEpoch();
+      return epoch === undefined ? undefined : {
+        epoch, operator: configStore.getAllowedUserId(), stamp: telegramTransportStampRuntime.getStamp(),
+      };
+    },
+    isAuthorityActive(authority) {
+      return getCurrentLeaderEpoch() === authority.epoch &&
+        configStore.getAllowedUserId() === authority.operator &&
+        telegramTransportStampRuntime.isActive(authority.stamp);
+    },
+    onDrained(ctx) { inboundRouteRuntime.onDeliverySettled(ctx); },
+  });
   const telegramApiTargetActivityRuntime =
-    TelegramApi.createTelegramApiTargetActivityRuntime();
+    TelegramApi.createTelegramApiTargetActivityRuntime({
+      captureDrain: captureCleanupDrain,
+    });
   // Retirement protection and dead-owner reclamation must inspect the same journal sources.
   const workspaceRetirementJournalPorts = {
     getActiveTurnTarget: activeTurnRuntime.getTarget,
@@ -697,7 +712,10 @@ export default function (pi: Pi.ExtensionAPI) {
     hasDispatchPending: lifecycle.hasDispatchPending,
     isCompactionInProgress: lifecycle.isCompactionInProgress,
     getActiveToolExecutions: lifecycle.getActiveToolExecutions,
-    hasPendingModelSwitch: pendingModelSwitchStore.has,
+    // Status is composed before the model-switch controller; it reads the controller's state when it renders.
+    hasPendingModelSwitch() {
+      return modelSwitchController.hasPendingSwitch();
+    },
     getQueuedItems: telegramQueueStore.getQueuedItems,
     getQueuedItemCount: Queue.countExecutableTelegramQueueItems,
     formatQueuedStatus: Queue.formatQueuedTelegramItemsStatus,
@@ -740,6 +758,11 @@ export default function (pi: Pi.ExtensionAPI) {
   const directTelegramApiRuntime =
     TelegramApi.createDefaultTelegramBridgeApiRuntime({
       getBotToken: configStore.getBotToken,
+      isThreadedMode() {
+        return threadStore.getBotState().threadMode === "enabled" ||
+          telegramBusFollowerRegistrationState.getTarget()?.threadId !== undefined ||
+          telegramBusLeaderState.getTarget()?.threadId !== undefined;
+      },
       getBotScope() {
         const config = configStore.get();
         return (
@@ -838,9 +861,13 @@ export default function (pi: Pi.ExtensionAPI) {
     lifecycle,
     typing,
     getDefaultChatId: proactivePushChatIdGetter,
+    isThreadedMode() {
+      return deliveryTargetPolicyRuntime.getTargetPolicyView().threaded === true;
+    },
     sendTypingAction,
     updateStatus,
     isContextActive: telegramSessionContextStore.isCurrent,
+    getSessionGeneration: telegramSessionContextStore.getGeneration,
     getTransportAuthority() {
       if (ownsTelegramDirectDelivery()) {
         const epoch = getCurrentLeaderEpoch();
@@ -876,6 +903,11 @@ export default function (pi: Pi.ExtensionAPI) {
   const deliveryTargetPolicyRuntime =
     Delivery.createTelegramDeliveryTargetPolicyRuntime({
       ownsDirect: lockRuntime.owns,
+      isThreadedMode() {
+        return threadStore.getBotState().threadMode === "enabled" ||
+          telegramBusFollowerRegistrationState.getTarget()?.threadId !== undefined ||
+          telegramBusLeaderState.getTarget()?.threadId !== undefined;
+      },
       isFollowerRegistered: telegramBusFollowerRegistrationState.isRegistered,
       getAllowedChatId: configStore.getAllowedUserId,
       getFollowerTarget: telegramBusFollowerRegistrationState.getTarget,
@@ -889,6 +921,7 @@ export default function (pi: Pi.ExtensionAPI) {
   const deliveryLifecycleRuntime =
     Delivery.createTelegramBridgeDeliveryLifecycleHooks({
       generationSeed: deliveryGenerationSeed,
+      captureDrain: captureCleanupDrain,
       getTargetPolicyView: deliveryTargetPolicyRuntime.getTargetPolicyView,
       getTransportStamp: telegramTransportStampRuntime.getStamp,
       isTransportStampActive: telegramTransportStampRuntime.isActive,
@@ -949,6 +982,7 @@ export default function (pi: Pi.ExtensionAPI) {
     publicationRuntime,
   } = Bindings.createTelegramActivityBindingRuntime({
     generation: deliveryGenerationSeed,
+    captureDrain: captureCleanupDrain,
     assistantOutput: {
       prepareTelegramPreview: previewRuntime.preparePublication,
       authority: {
@@ -1030,8 +1064,6 @@ export default function (pi: Pi.ExtensionAPI) {
   const modelSwitchController =
     Model.createTelegramModelSwitchControllerRuntime({
       isIdle,
-      getPendingModelSwitch: pendingModelSwitchStore.get,
-      setPendingModelSwitch: pendingModelSwitchStore.set,
       getActiveTurn: activeTurnRuntime.get,
       getAbortHandler: abort.getHandler,
       hasAbortHandler: abort.hasHandler,
@@ -1265,7 +1297,7 @@ export default function (pi: Pi.ExtensionAPI) {
     lifecycle: bridgeRuntime.lifecycle,
     isIdle,
     hasPendingMessages,
-    hasPendingControl: pendingModelSwitchStore.has,
+    hasPendingControl: modelSwitchController.hasPendingSwitch,
     publication: publicationRuntime,
     activity: activityRuntime,
     delivery: deliveryLifecycleRuntime,
@@ -1442,6 +1474,14 @@ export default function (pi: Pi.ExtensionAPI) {
           Bus.TELEGRAM_BUS_CAPABILITY_WORKSPACE_RESTORE,
         )
       );
+    },
+    canUsePreDispatchRebind(recipient) {
+      return lockRuntime.owns() && telegramBusFollowerRegistry.list().every(function (follower) {
+        return Bus.hasTelegramBusCapability(follower.protocol, Bus.TELEGRAM_BUS_CAPABILITY_PRE_DISPATCH_REBIND);
+      }) && (recipient?.kind !== "follower" || Bus.hasTelegramBusCapability(
+        telegramBusFollowerRegistry.get(recipient.instanceId)?.protocol,
+        Bus.TELEGRAM_BUS_CAPABILITY_PRE_DISPATCH_REBIND_EXECUTION,
+      ));
     },
     hasWorkspaceLiveRebindAuthority() {
       return (
@@ -2208,6 +2248,7 @@ export default function (pi: Pi.ExtensionAPI) {
         followerRegistry: telegramBusFollowerRegistry,
         authSecret: telegramBusAuthSecret,
         protocolIdentity: telegramBusProtocolIdentity,
+        requiresPreDispatchRebindReader() { return threadStore.hasPreDispatchRebindEvidence(); },
         selectedMenuDelivery,
         startPolling: pollingAdmissionRuntime.start,
         stopPolling: pollingAdmissionRuntime.stop,
@@ -3044,6 +3085,7 @@ export default function (pi: Pi.ExtensionAPI) {
     isSessionContextActive(ctx) {
       return telegramSessionContextStore.isCurrent(ctx);
     },
+    getSessionGeneration: telegramSessionContextStore.getGeneration,
     isTurnTransportActive(turn) {
       return telegramTransportStampRuntime.isActive(turn.transportStamp);
     },

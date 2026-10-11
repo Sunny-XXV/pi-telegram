@@ -356,7 +356,7 @@ test("Command helpers expose Telegram bot command definitions", () => {
     "compact",
     "next",
     "continue",
-    "steer",
+    "mode",
     "abort",
     "stop",
   ]) {
@@ -364,8 +364,11 @@ test("Command helpers expose Telegram bot command definitions", () => {
   }
   assert.doesNotMatch(
     TELEGRAM_APP_MENU_INTRO_HTML,
-    /<code>\/(?:start|name|compact|next|continue|abort|stop|name)<\/code>/,
+    /<code>\/(?:start|name|compact|next|continue|mode|abort|stop|name)<\/code>/,
   );
+  const appMenu = buildTelegramAppMenuHtml("<b>Status:</b> <code>idle</code>");
+  assert.match(appMenu, / \/mode — Input mode: steer \/ followup/);
+  assert.doesNotMatch(appMenu, /\/(?:steer)\b/);
   const expectedBuiltins = [
     {
       command: "start",

@@ -204,7 +204,7 @@ Named profile identifiers contain only lowercase ASCII letters and digits (maxim
 
 ### Operator Menu
 
-`/start` opens the Telegram-native control panel: status, prompt-template commands, model selection, thinking level, settings, queue controls, and extension sections. It is the primary Telegram UI; reaction shortcuts are secondary queue affordances.
+`/start` opens the Telegram-native control panel: status, prompt-template commands, model selection, thinking level, input mode, settings, queue controls, and extension sections. Use **Input mode** or `/mode` for everyday delivery changes; the one-off `/steer` command remains available but is not listed in this panel. It is the primary Telegram UI; reaction shortcuts are secondary queue affordances.
 
 ### Queue Runtime
 

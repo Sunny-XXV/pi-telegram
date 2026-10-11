@@ -707,7 +707,6 @@ function formatTelegramAppMenuIntroHtml(extensionLines) {
         line("new", "Start a new session"),
         line("continue", "Queue continue prompt"),
         line("mode", "Input mode: steer / followup"),
-        line("steer", "Steer active turn"),
         line("next", "Force next turn"),
         ...extensionLines,
         line("abort", "Abort Pi"),
